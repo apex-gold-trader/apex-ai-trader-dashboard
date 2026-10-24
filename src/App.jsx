@@ -3,21 +3,21 @@ import { useEffect, useMemo, useState } from 'react';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 
 const marketMeta = {
-  XAUUSD: { label: 'Gold', unit: 'XAUUSD', color: '#f6c453', description: 'Spot Gold' },
-  BTCUSD: { label: 'Bitcoin', unit: 'BTCUSD', color: '#f7931a', description: 'BTC/USD' },
-  EURUSD: { label: 'EUR/USD', unit: 'EURUSD', color: '#58d68d', description: 'Euro / Dollar' },
-  ETHUSD: { label: 'Ethereum', unit: 'ETHUSD', color: '#8a7dff', description: 'ETH/USD' },
-  NAS100: { label: 'NASDAQ 100', unit: 'NAS100', color: '#7cc7ff', description: 'Index' },
+  XAUUSD: { label: 'الذهب', unit: 'XAUUSD', color: '#f6c453', description: 'ذهب نقدي' },
+  BTCUSD: { label: 'بيتكوين', unit: 'BTCUSD', color: '#f7931a', description: 'BTC / USD' },
+  EURUSD: { label: 'يورو/دولار', unit: 'EURUSD', color: '#58d68d', description: 'EUR / USD' },
+  ETHUSD: { label: 'إيثيريوم', unit: 'ETHUSD', color: '#8a7dff', description: 'ETH / USD' },
+  NAS100: { label: 'ناسداك 100', unit: 'NAS100', color: '#7cc7ff', description: 'مؤشر' },
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 const formatPrice = (value, symbol) => {
   if (!Number.isFinite(value)) return '—';
-  if (symbol === 'XAUUSD') return `$${value.toFixed(2)}`;
+  if (symbol === 'XAUUSD') return `${value.toFixed(2)} $`;
   if (symbol === 'EURUSD') return value.toFixed(5);
   if (symbol === 'NAS100') return value.toFixed(2);
-  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return `$${value.toFixed(2)}`;
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return `${value.toFixed(2)} $`;
   return value.toFixed(4);
 };
 
@@ -210,11 +210,11 @@ async function fetchLiveMarketData() {
 }
 
 function buildSparkline(series) {
-  if (!series || series.length < 2) return '';
+  if (!series || series.length < 2) return null;
   const max = Math.max(...series);
   const min = Math.min(...series);
   const height = 64;
-  const width = 250;
+  const width = 260;
   const range = max - min || 1;
 
   const points = series
@@ -228,46 +228,47 @@ function buildSparkline(series) {
   return { points, width, height };
 }
 
-function analyzeTrade({ symbol, timeframe, marketData }) {
+function computeTradePlan({ symbol, timeframe, marketData }) {
   const entry = marketData[symbol].price;
-  const indicatorSet = marketData[symbol].indicators;
-  const rsi = indicatorSet.rsi;
-  const emaShort = indicatorSet.emaShort;
-  const emaLong = indicatorSet.emaLong;
-  const macd = indicatorSet.macd;
-  const signalBias =
-    (rsi < 45 && emaShort > emaLong && macd > 0) || (rsi < 40 && marketData[symbol].price < indicatorSet.bollingerLower)
+  const indicators = marketData[symbol].indicators;
+  const rsi = indicators.rsi;
+  const emaShort = indicators.emaShort;
+  const emaLong = indicators.emaLong;
+  const macd = indicators.macd;
+
+  const direction =
+    (rsi < 45 && emaShort > emaLong && macd > 0) || (rsi < 40 && marketData[symbol].price < indicators.bollingerLower)
       ? 'BUY'
-      : (rsi > 55 && emaShort < emaLong && macd < 0) || (rsi > 60 && marketData[symbol].price > indicatorSet.bollingerUpper)
+      : (rsi > 55 && emaShort < emaLong && macd < 0) || (rsi > 60 && marketData[symbol].price > indicators.bollingerUpper)
         ? 'SELL'
         : 'BUY';
 
-  const direction = signalBias;
-  const volatilityBuffer = {
-    XAUUSD: 0.008,
-    BTCUSD: 0.012,
-    EURUSD: 0.004,
-    ETHUSD: 0.015,
-    NAS100: 0.01,
-  }[symbol] ?? 0.01;
+  const riskConfig = {
+    XAUUSD: { stopRate: 0.0012, tp1: 1.4, tp2: 2.3, tp3: 3.2, breakEvenFactor: 0.18, trailingFactor: 0.42 },
+    BTCUSD: { stopRate: 0.002, tp1: 1.4, tp2: 2.2, tp3: 3.1, breakEvenFactor: 0.2, trailingFactor: 0.45 },
+    EURUSD: { stopRate: 0.0007, tp1: 1.5, tp2: 2.6, tp3: 3.6, breakEvenFactor: 0.2, trailingFactor: 0.45 },
+    ETHUSD: { stopRate: 0.003, tp1: 1.5, tp2: 2.5, tp3: 3.5, breakEvenFactor: 0.2, trailingFactor: 0.45 },
+    NAS100: { stopRate: 0.0015, tp1: 1.4, tp2: 2.2, tp3: 3.2, breakEvenFactor: 0.18, trailingFactor: 0.42 },
+  };
 
-  const riskPerTrade = 0.02;
-  const accountSize = 10000;
-  const riskAmount = accountSize * riskPerTrade;
-  const stopDistance = entry * volatilityBuffer;
+  const config = riskConfig[symbol] || riskConfig.XAUUSD;
+  const stopDistance = Math.max(entry * config.stopRate, 0.01);
   const stopLoss = direction === 'BUY' ? entry - stopDistance : entry + stopDistance;
-  const tpDistance = stopDistance * 1.8;
-  const tp1 = direction === 'BUY' ? entry + tpDistance * 0.75 : entry - tpDistance * 0.75;
-  const tp2 = direction === 'BUY' ? entry + tpDistance * 1.35 : entry - tpDistance * 1.35;
-  const tp3 = direction === 'BUY' ? entry + tpDistance * 2 : entry - tpDistance * 2;
-  const lotSize = Math.max(0.01, Number((riskAmount / Math.max(stopDistance * 100000, 1)).toFixed(2)));
-  const breakEven = direction === 'BUY' ? entry + stopDistance * 0.35 : entry - stopDistance * 0.35;
-  const trailingStop = direction === 'BUY' ? entry + stopDistance * 0.5 : entry - stopDistance * 0.5;
-  const confidence = clamp(Math.round(70 + (Math.abs(rsi - 50) * 0.7) + (direction === 'BUY' ? 8 : -8)), 68, 96);
+  const tp1 = direction === 'BUY' ? entry + stopDistance * config.tp1 : entry - stopDistance * config.tp1;
+  const tp2 = direction === 'BUY' ? entry + stopDistance * config.tp2 : entry - stopDistance * config.tp2;
+  const tp3 = direction === 'BUY' ? entry + stopDistance * config.tp3 : entry - stopDistance * config.tp3;
+  const breakEven = direction === 'BUY' ? entry + stopDistance * config.breakEvenFactor : entry - stopDistance * config.breakEvenFactor;
+  const trailingStop = direction === 'BUY' ? entry + stopDistance * config.trailingFactor : entry - stopDistance * config.trailingFactor;
+
+  const riskAmount = 100;
+  const lotSizeRaw = riskAmount / Math.max(stopDistance * 100000, 1);
+  const lotSize = clamp(Number(lotSizeRaw.toFixed(2)), 0.01, 0.25);
+
+  const confidence = clamp(Math.round(72 + (Math.abs(rsi - 50) * 0.6) + (direction === 'BUY' ? 7 : -3)), 70, 94);
 
   const reasons = {
-    BUY: `The ${timeframe} structure supports bullish continuation. RSI is ${rsi.toFixed(1)} while EMA short (${emaShort.toFixed(2)}) remains above EMA long (${emaLong.toFixed(2)}), and MACD momentum is positive. Price is also respecting the lower market structure around support, which favors accumulation before a breakout continuation.`,
-    SELL: `The ${timeframe} structure is showing active distribution. RSI is ${rsi.toFixed(1)} and EMA short (${emaShort.toFixed(2)}) is trailing below EMA long (${emaLong.toFixed(2)}), with MACD negative. Price is approaching resistance and is at risk of a supply-led rejection, supporting a short bias.`,
+    BUY: `هيكل ${timeframe} يشير إلى استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، و المتوسط المتحرك القصير (${emaShort.toFixed(2)}) أعلى من المتوسط الطويل (${emaLong.toFixed(2)}). كما أن MACD إيجابي ويؤكد تدفق شرائي، مع دعم من منطقة الدعم الحالية، لذلك التوصية هي الدخول طويلًا مع إدارة مخاطر مضبوطة جدًا.`,
+    SELL: `هيكل ${timeframe} يشير إلى ضغوط بيع قوية. مؤشر RSI عند ${rsi.toFixed(1)}، والمتوسط القصير (${emaShort.toFixed(2)}) أقل من المتوسط الطويل (${emaLong.toFixed(2)}). كما أن MACD سلبي، و السعر يقترب من منطقة مقاومة قوية، لذلك التوصية هي الدخول قصيرًا مع إغلاق مستهدف سريع ووقف خسارة ضيق.`,
   };
 
   return {
@@ -283,7 +284,7 @@ function analyzeTrade({ symbol, timeframe, marketData }) {
     reason: reasons[direction],
     confidence,
     timeframe,
-    strategy: direction === 'BUY' ? 'Trend continuation / bullish breakout' : 'Trend rejection / bearish continuation',
+    strategy: direction === 'BUY' ? 'استمرار صعودي' : 'إعادة اختبار مقاومة / ضغط بيعي',
   };
 }
 
@@ -296,19 +297,19 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let mounted = true;
+    let active = true;
 
     const refresh = async () => {
       try {
         const live = await fetchLiveMarketData();
-        if (!mounted) return;
+        if (!active) return;
         setMarketData(live);
         setLastUpdated(Date.now());
       } catch (error) {
-        if (!mounted) return;
+        if (!active) return;
         setMarketData(generateMarketData());
       } finally {
-        if (mounted) setLoading(false);
+        if (active) setLoading(false);
       }
     };
 
@@ -316,23 +317,16 @@ function App() {
     const interval = setInterval(refresh, 8000);
 
     return () => {
-      mounted = false;
+      active = false;
       clearInterval(interval);
     };
   }, []);
 
   const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
 
-  useEffect(() => {
-    if (tradeResult) {
-      const next = analyzeTrade({ symbol: selectedSymbol, timeframe, marketData });
-      setTradeResult(next);
-    }
-  }, [selectedSymbol, timeframe, marketData]);
-
   const handleAnalyze = () => {
-    const next = analyzeTrade({ symbol: selectedSymbol, timeframe, marketData });
-    setTradeResult(next);
+    const plan = computeTradePlan({ symbol: selectedSymbol, timeframe, marketData });
+    setTradeResult(plan);
   };
 
   const symbols = Object.keys(marketMeta);
@@ -341,12 +335,12 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">AI Market Intelligence</p>
-          <h1>Apex AI Trader Dashboard</h1>
+          <p className="eyebrow">ذكاء السوق</p>
+          <h1>لوحة Apex AI Trader</h1>
         </div>
         <div className="status-pill">
           <span className="live-dot" />
-          {loading ? 'Syncing live feeds...' : `Live • ${new Date(lastUpdated).toLocaleTimeString()}`}
+          {loading ? 'جارٍ تحديث الأسعار...' : `مباشر • ${new Date(lastUpdated).toLocaleTimeString('ar-EG')}`}
         </div>
       </header>
 
@@ -387,8 +381,8 @@ function App() {
         <section className="analysis-panel">
           <div className="panel-header">
             <div>
-              <p className="eyebrow">Trade Engine</p>
-              <h2>Smart Scalping & AI Setup</h2>
+              <p className="eyebrow">محرك التداول</p>
+              <h2>التحليل الفني والسكالبينج الذكي</h2>
             </div>
             <div className="timeframe-picker">
               {TIMEFRAMES.map((option) => (
@@ -408,16 +402,16 @@ function App() {
             <div className="signal-overview">
               <div className="signal-topline">
                 <div>
-                  <p className="eyebrow">Selected Asset</p>
+                  <p className="eyebrow">الأصل المختار</p>
                   <h3>{marketMeta[selectedSymbol].label}</h3>
                 </div>
-                <button type="button" onClick={handleAnalyze} className="analyze-btn">Analyze Now</button>
+                <button type="button" onClick={handleAnalyze} className="analyze-btn">حلّل الآن</button>
               </div>
 
               <div className="chart-card">
                 <div className="chart-stats">
                   <div>
-                    <span>Last Price</span>
+                    <span>السعر الحالي</span>
                     <strong>{formatPrice(marketData[selectedSymbol]?.price ?? 0, selectedSymbol)}</strong>
                   </div>
                   <div>
@@ -425,8 +419,8 @@ function App() {
                     <strong>{marketData[selectedSymbol]?.indicators?.rsi?.toFixed(1) ?? '50.0'}</strong>
                   </div>
                   <div>
-                    <span>EMA Trend</span>
-                    <strong>{marketData[selectedSymbol]?.indicators?.emaShort > marketData[selectedSymbol]?.indicators?.emaLong ? 'Bullish' : 'Bearish'}</strong>
+                    <span>اتجاه EMA</span>
+                    <strong>{marketData[selectedSymbol]?.indicators?.emaShort > marketData[selectedSymbol]?.indicators?.emaLong ? 'صاعد' : 'هابطة'}</strong>
                   </div>
                 </div>
 
@@ -449,19 +443,19 @@ function App() {
                 <>
                   <div className="trade-head">
                     <div>
-                      <span className="eyebrow">AI Recommendation</span>
-                      <h3 className={tradeResult.direction === 'BUY' ? 'buy-text' : 'sell-text'}>{tradeResult.direction}</h3>
+                      <span className="eyebrow">توصية الذكاء</span>
+                      <h3 className={tradeResult.direction === 'BUY' ? 'buy-text' : 'sell-text'}>{tradeResult.direction === 'BUY' ? 'شراء' : 'بيع'}</h3>
                     </div>
-                    <span className="confidence">{tradeResult.confidence}% confidence</span>
+                    <span className="confidence">{tradeResult.confidence}% ثقة</span>
                   </div>
 
                   <div className="trade-grid">
                     <div className="trade-item">
-                      <span>Entry Price</span>
+                      <span>سعر الدخول</span>
                       <strong>{formatPrice(tradeResult.entry, selectedSymbol)}</strong>
                     </div>
                     <div className="trade-item">
-                      <span>Stop Loss</span>
+                      <span>وقف الخسارة</span>
                       <strong>{formatPrice(tradeResult.stopLoss, selectedSymbol)}</strong>
                     </div>
                     <div className="trade-item">
@@ -477,15 +471,15 @@ function App() {
                       <strong>{formatPrice(tradeResult.tp3, selectedSymbol)}</strong>
                     </div>
                     <div className="trade-item">
-                      <span>Recommended Lot</span>
-                      <strong>{tradeResult.lotSize.toFixed(2)} lots</strong>
+                      <span>حجم اللوت</span>
+                      <strong>{tradeResult.lotSize.toFixed(2)} لوت</strong>
                     </div>
                     <div className="trade-item">
-                      <span>Break-even</span>
+                      <span>نقطة التعادل</span>
                       <strong>{formatPrice(tradeResult.breakEven, selectedSymbol)}</strong>
                     </div>
                     <div className="trade-item">
-                      <span>Trailing Stop</span>
+                      <span>التتبع التلقائي</span>
                       <strong>{formatPrice(tradeResult.trailingStop, selectedSymbol)}</strong>
                     </div>
                   </div>
@@ -496,7 +490,7 @@ function App() {
                 </>
               ) : (
                 <div className="empty-state">
-                  <p>Press “Analyze Now” to generate a live trade setup.</p>
+                  <p>اضغط على «حلّل الآن» للحصول على تحليل جديد وثابت.</p>
                 </div>
               )}
             </div>
@@ -508,3 +502,4 @@ function App() {
 }
 
 export default App;
+

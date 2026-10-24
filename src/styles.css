@@ -25,7 +25,7 @@ html, body, #root {
     radial-gradient(circle at bottom right, rgba(26, 223, 169, 0.1), transparent 30%),
     var(--bg);
   color: var(--text);
-  font-family: Inter, 'Segoe UI', sans-serif;
+  font-family: 'Segoe UI', Tahoma, sans-serif;
 }
 
 body {
@@ -54,7 +54,7 @@ button {
   margin: 0 0 8px;
   color: var(--blue);
   font-size: 11px;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
@@ -64,7 +64,7 @@ h1, h2, h3, p {
 
 h1 {
   font-size: clamp(2rem, 4vw, 3rem);
-  letter-spacing: -0.05em;
+  letter-spacing: -0.04em;
 }
 
 .status-pill {
@@ -367,3 +367,4 @@ h1 {
     grid-template-columns: 1fr;
   }
 }
+
