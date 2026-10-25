@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 
 const marketMeta = {
-  XAUUSD: { label: 'الذهب', unit: 'XAUUSD', color: '#f6c453', description: 'ذهب نقدي' },
+  XAUUSD: { label: 'الذهب', unit: 'XAUUSD', color: '#f6c453', description: 'ذهب فوري' },
   BTCUSD: { label: 'بيتكوين', unit: 'BTCUSD', color: '#f7931a', description: 'BTC / USD' },
   EURUSD: { label: 'يورو/دولار', unit: 'EURUSD', color: '#58d68d', description: 'EUR / USD' },
   ETHUSD: { label: 'إيثيريوم', unit: 'ETHUSD', color: '#8a7dff', description: 'ETH / USD' },
@@ -26,6 +26,7 @@ const toNumber = (value) => Number(value ?? 0);
 function buildTrendSeries(base, drift, volatility, length = 40) {
   const series = [];
   let current = base;
+
   for (let i = 0; i < length; i += 1) {
     const wave = Math.sin((i / Math.max(length, 1)) * 10) * volatility;
     const noise = (Math.random() - 0.5) * volatility * 1.5;
@@ -33,6 +34,7 @@ function buildTrendSeries(base, drift, volatility, length = 40) {
     current = Math.max(current + step, base * 0.65);
     series.push(Number(current.toFixed(4)));
   }
+
   return series;
 }
 
@@ -43,27 +45,35 @@ function average(values) {
 
 function getRsi(series) {
   if (series.length < 14) return 50;
+
   let gains = 0;
   let losses = 0;
+
   for (let i = 1; i < 15; i += 1) {
     const diff = series[i] - series[i - 1];
     if (diff >= 0) gains += diff;
     else losses += Math.abs(diff);
   }
+
   const avgGain = gains / 14;
   const avgLoss = losses / 14;
+
   if (avgLoss === 0) return 100;
+
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);
 }
 
 function getEma(series, period) {
   if (!series.length) return 0;
+
   const multiplier = 2 / (period + 1);
   let ema = series[0];
+
   for (let i = 1; i < series.length; i += 1) {
     ema = (series[i] - ema) * multiplier + ema;
   }
+
   return ema;
 }
 
@@ -77,6 +87,7 @@ function getBollinger(series) {
   const mid = average(series.slice(-20));
   const variance = average(series.slice(-20).map((point) => (point - mid) ** 2));
   const std = Math.sqrt(variance);
+
   return { upper: mid + std * 2, lower: mid - std * 2, mid };
 }
 
@@ -129,41 +140,99 @@ function generateMarketData() {
   return result;
 }
 
-async function fetchGoldPrice() {
-  const response = await fetch('https://api.gold-api.com/price/XAU');
-  if (!response.ok) throw new Error('Gold API unavailable');
-  const data = await response.json();
-  return Number(toNumber(data.price));
+async function fetchXauusdPrice() {
+  const urls = [
+    'https://api.gold-api.com/price/XAU',
+    'https://api.metals.live/v1/spot',
+  ];
+
+  for (const url of urls) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) continue;
+
+      const data = await response.json();
+
+      if (url.includes('gold-api')) {
+        const price = Number(toNumber(data.price));
+        if (Number.isFinite(price) && price > 0) return price;
+      }
+
+      if (Array.isArray(data)) {
+        const item = data.find((entry) => {
+          const key = (entry.symbol || entry.name || entry.code || '').toString().toUpperCase();
+          return key.includes('XAU') || key.includes('GOLD');
+        });
+
+        const price = Number(toNumber(item?.price ?? item?.value ?? item?.gold ?? item?.xau));
+        if (Number.isFinite(price) && price > 0) return price;
+      }
+    } catch (_error) {
+      // next source
+    }
+  }
+
+  throw new Error('XAUUSD API unavailable');
 }
 
 async function fetchEurUsdPrice() {
-  const response = await fetch('https://api.exchangerate.host/convert?from=EUR&to=USD');
-  if (!response.ok) throw new Error('FX API unavailable');
+  const response = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD');
+  if (!response.ok) throw new Error('EURUSD API unavailable');
+
   const data = await response.json();
-  return Number(toNumber(data.result));
+  const price = Number(toNumber(data?.rates?.USD));
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error('EURUSD price invalid');
+  }
+
+  return price;
 }
 
 async function fetchBinancePrice(symbol) {
   const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
   if (!response.ok) throw new Error(`${symbol} API unavailable`);
+
   const data = await response.json();
   return Number(toNumber(data.price));
 }
 
 async function fetchNasdaqPrice() {
-  const response = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d');
-  if (!response.ok) throw new Error('NASDAQ API unavailable');
-  const data = await response.json();
-  const result = data?.chart?.result?.[0];
-  const lastPrice = result?.meta?.regularMarketPrice ?? result?.meta?.previousClose ?? 19000;
-  return Number(lastPrice);
+  const urls = [
+    'https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d',
+    'https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=IXIC&apikey=demo',
+  ];
+
+  for (const url of urls) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) continue;
+
+      const data = await response.json();
+
+      if (url.includes('yahoo')) {
+        const result = data?.chart?.result?.[0];
+        const price = Number(toNumber(result?.meta?.regularMarketPrice ?? result?.meta?.previousClose));
+        if (Number.isFinite(price) && price > 0) return price;
+      }
+
+      if (url.includes('alphavantage')) {
+        const price = Number(toNumber(data?.['Global Quote']?.['05. price']));
+        if (Number.isFinite(price) && price > 0) return price;
+      }
+    } catch (_error) {
+      // next source
+    }
+  }
+
+  throw new Error('NASDAQ API unavailable');
 }
 
 async function fetchLiveMarketData() {
   const [btc, eth, gold, eurUsd, nasdaq] = await Promise.allSettled([
     fetchBinancePrice('BTCUSDT'),
     fetchBinancePrice('ETHUSDT'),
-    fetchGoldPrice(),
+    fetchXauusdPrice(),
     fetchEurUsdPrice(),
     fetchNasdaqPrice(),
   ]);
@@ -211,6 +280,7 @@ async function fetchLiveMarketData() {
 
 function buildSparkline(series) {
   if (!series || series.length < 2) return null;
+
   const max = Math.max(...series);
   const min = Math.min(...series);
   const height = 64;
@@ -244,15 +314,16 @@ function computeTradePlan({ symbol, timeframe, marketData }) {
         : 'BUY';
 
   const riskConfig = {
-    XAUUSD: { stopRate: 0.0012, tp1: 1.4, tp2: 2.3, tp3: 3.2, breakEvenFactor: 0.18, trailingFactor: 0.42 },
-    BTCUSD: { stopRate: 0.002, tp1: 1.4, tp2: 2.2, tp3: 3.1, breakEvenFactor: 0.2, trailingFactor: 0.45 },
-    EURUSD: { stopRate: 0.0007, tp1: 1.5, tp2: 2.6, tp3: 3.6, breakEvenFactor: 0.2, trailingFactor: 0.45 },
-    ETHUSD: { stopRate: 0.003, tp1: 1.5, tp2: 2.5, tp3: 3.5, breakEvenFactor: 0.2, trailingFactor: 0.45 },
-    NAS100: { stopRate: 0.0015, tp1: 1.4, tp2: 2.2, tp3: 3.2, breakEvenFactor: 0.18, trailingFactor: 0.42 },
+    XAUUSD: { stopRate: 0.00075, tp1: 1.2, tp2: 1.8, tp3: 2.5, breakEvenFactor: 0.12, trailingFactor: 0.25 },
+    BTCUSD: { stopRate: 0.0014, tp1: 1.2, tp2: 1.9, tp3: 2.8, breakEvenFactor: 0.14, trailingFactor: 0.28 },
+    EURUSD: { stopRate: 0.00065, tp1: 1.5, tp2: 2.2, tp3: 3.1, breakEvenFactor: 0.14, trailingFactor: 0.25 },
+    ETHUSD: { stopRate: 0.0018, tp1: 1.3, tp2: 2.1, tp3: 3.0, breakEvenFactor: 0.15, trailingFactor: 0.28 },
+    NAS100: { stopRate: 0.0009, tp1: 1.2, tp2: 1.8, tp3: 2.6, breakEvenFactor: 0.12, trailingFactor: 0.25 },
   };
 
   const config = riskConfig[symbol] || riskConfig.XAUUSD;
-  const stopDistance = Math.max(entry * config.stopRate, 0.01);
+  const stopDistance = Math.max(entry * config.stopRate, symbol === 'XAUUSD' ? 1.2 : 0.02);
+
   const stopLoss = direction === 'BUY' ? entry - stopDistance : entry + stopDistance;
   const tp1 = direction === 'BUY' ? entry + stopDistance * config.tp1 : entry - stopDistance * config.tp1;
   const tp2 = direction === 'BUY' ? entry + stopDistance * config.tp2 : entry - stopDistance * config.tp2;
@@ -260,15 +331,14 @@ function computeTradePlan({ symbol, timeframe, marketData }) {
   const breakEven = direction === 'BUY' ? entry + stopDistance * config.breakEvenFactor : entry - stopDistance * config.breakEvenFactor;
   const trailingStop = direction === 'BUY' ? entry + stopDistance * config.trailingFactor : entry - stopDistance * config.trailingFactor;
 
-  const riskAmount = 100;
+  const riskAmount = 40;
   const lotSizeRaw = riskAmount / Math.max(stopDistance * 100000, 1);
   const lotSize = clamp(Number(lotSizeRaw.toFixed(2)), 0.01, 0.25);
-
   const confidence = clamp(Math.round(72 + (Math.abs(rsi - 50) * 0.6) + (direction === 'BUY' ? 7 : -3)), 70, 94);
 
   const reasons = {
-    BUY: `هيكل ${timeframe} يشير إلى استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، و المتوسط المتحرك القصير (${emaShort.toFixed(2)}) أعلى من المتوسط الطويل (${emaLong.toFixed(2)}). كما أن MACD إيجابي ويؤكد تدفق شرائي، مع دعم من منطقة الدعم الحالية، لذلك التوصية هي الدخول طويلًا مع إدارة مخاطر مضبوطة جدًا.`,
-    SELL: `هيكل ${timeframe} يشير إلى ضغوط بيع قوية. مؤشر RSI عند ${rsi.toFixed(1)}، والمتوسط القصير (${emaShort.toFixed(2)}) أقل من المتوسط الطويل (${emaLong.toFixed(2)}). كما أن MACD سلبي، و السعر يقترب من منطقة مقاومة قوية، لذلك التوصية هي الدخول قصيرًا مع إغلاق مستهدف سريع ووقف خسارة ضيق.`,
+    BUY: `هيكل ${timeframe} يشير إلى استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، والمتوسط المتحرك القصير (${emaShort.toFixed(2)}) أعلى من المتوسط الطويل (${emaLong.toFixed(2)}). كما أن MACD إيجابي ويؤكد تدفق شرائي، مع دعم من منطقة الدعم الحالية، لذلك التوصية هي الدخول طويلًا مع إدارة مخاطر مضبوطة جدًا.`,
+    SELL: `هيكل ${timeframe} يشير إلى ضغوط بيع قوية. مؤشر RSI عند ${rsi.toFixed(1)}، والمتوسط المتحرك القصير (${emaShort.toFixed(2)}) أقل من المتوسط الطويل (${emaLong.toFixed(2)}). كما أن MACD سلبي، والسعر يقترب من منطقة مقاومة قوية، لذلك التوصية هي الدخول قصيرًا مع إغلاق مستهدف سريع ووقف خسارة ضيق.`,
   };
 
   return {
@@ -305,7 +375,7 @@ function App() {
         if (!active) return;
         setMarketData(live);
         setLastUpdated(Date.now());
-      } catch (error) {
+      } catch (_error) {
         if (!active) return;
         setMarketData(generateMarketData());
       } finally {
@@ -325,7 +395,12 @@ function App() {
   const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
 
   const handleAnalyze = () => {
-    const plan = computeTradePlan({ symbol: selectedSymbol, timeframe, marketData });
+    const plan = computeTradePlan({
+      symbol: selectedSymbol,
+      timeframe,
+      marketData,
+    });
+
     setTradeResult(plan);
   };
 
@@ -384,6 +459,7 @@ function App() {
               <p className="eyebrow">محرك التداول</p>
               <h2>التحليل الفني والسكالبينج الذكي</h2>
             </div>
+
             <div className="timeframe-picker">
               {TIMEFRAMES.map((option) => (
                 <button
@@ -502,4 +578,3 @@ function App() {
 }
 
 export default App;
-
