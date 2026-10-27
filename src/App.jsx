@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
@@ -12,11 +12,11 @@ const marketMeta = {
 };
 
 const symbolMap = {
-  XAUUSD: { market: 'forex', ticker: 'OANDA:XAUUSD' },
-  BTCUSD: { market: 'crypto', ticker: 'BINANCE:BTCUSDT' },
-  EURUSD: { market: 'forex', ticker: 'FX:EURUSD' },
-  ETHUSD: { market: 'crypto', ticker: 'BINANCE:ETHUSDT' },
-  NAS100: { market: 'america', ticker: 'NASDAQ:IXIC' },
+  XAUUSD: { ticker: 'OANDA:XAUUSD', market: 'forex' },
+  BTCUSD: { ticker: 'BINANCE:BTCUSDT', market: 'crypto' },
+  EURUSD: { ticker: 'FX:EURUSD', market: 'forex' },
+  ETHUSD: { ticker: 'BINANCE:ETHUSDT', market: 'crypto' },
+  NAS100: { ticker: 'NASDAQ:IXIC', market: 'america' },
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -162,10 +162,9 @@ async function fetchTradingViewQuote(symbol) {
 
     const json = await response.json();
     const item = json?.data?.find((row) => row?.s === mapping.ticker) || json?.data?.[0];
-    const priceValue = item?.c ?? item?.lp ?? item?.p ?? item?.last ?? item?.last_price ?? item?.v ?? null;
-
-    const parsedPrice = Number(priceValue);
-    return Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : null;
+    const value = item?.c ?? item?.lp ?? item?.p ?? item?.last ?? item?.last_price ?? item?.v ?? null;
+    const price = Number(value);
+    return Number.isFinite(price) && price > 0 ? price : null;
   } catch {
     return null;
   }
@@ -174,17 +173,13 @@ async function fetchTradingViewQuote(symbol) {
 async function fetchLiveMarketDataFromTradingView() {
   const fallback = generateMarketData();
   const records = await Promise.allSettled(
-    Object.keys(marketMeta).map(async (symbol) => {
-      const quote = await fetchTradingViewQuote(symbol);
-      return { symbol, quote };
-    }),
+    Object.keys(marketMeta).map(async (symbol) => ({ symbol, quote: await fetchTradingViewQuote(symbol) })),
   );
 
   const next = {};
-
-  records.forEach((result) => {
-    if (result.status !== 'fulfilled') return;
-    const { symbol, quote } = result.value;
+  records.forEach((entry) => {
+    if (entry.status !== 'fulfilled') return;
+    const { symbol, quote } = entry.value;
     if (!quote) return;
 
     const base = fallback[symbol];
@@ -204,6 +199,7 @@ async function fetchLiveMarketDataFromTradingView() {
 
 function buildSparkline(series) {
   if (!series || series.length < 2) return '';
+
   const max = Math.max(...series);
   const min = Math.min(...series);
   const height = 64;
@@ -308,8 +304,6 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
 }
 
 function App() {
-  const tradingViewContainer = useRef(null);
-  const tvWidgetRef = useRef(null);
   const [timeframe, setTimeframe] = useState('1m');
   const [marketData, setMarketData] = useState(generateMarketData());
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
@@ -322,105 +316,38 @@ function App() {
   const [signals, setSignals] = useState(() => {
     if (typeof window === 'undefined') return [];
     try {
-      const stored = window.localStorage.getItem(STORAGE_KEY);
-      return stored ? JSON.parse(stored) : [];
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
     } catch {
       return [];
     }
   });
 
   useEffect(() => {
-    let mounted = true;
+    let isMounted = true;
 
     const refresh = async () => {
       try {
         const live = await fetchLiveMarketDataFromTradingView();
-        if (!mounted) return;
+        if (!isMounted) return;
         setMarketData(live);
         setLastUpdated(Date.now());
       } catch {
-        if (!mounted) return;
+        if (!isMounted) return;
         setMarketData(generateMarketData());
       } finally {
-        if (mounted) setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
 
     refresh();
-    const interval = setInterval(refresh, 6000);
+    const interval = setInterval(refresh, 8000);
 
     return () => {
-      mounted = false;
+      isMounted = false;
       clearInterval(interval);
     };
   }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    if (!tradingViewContainer.current) return undefined;
-
-    const scriptId = 'tradingview-widget-script';
-    const existingScript = document.getElementById(scriptId);
-
-    const renderWidget = () => {
-      if (!window.TradingView || !tradingViewContainer.current) return;
-
-      if (tvWidgetRef.current) {
-        try {
-          tvWidgetRef.current.remove();
-        } catch {
-          // ignore
-        }
-      }
-
-      const widget = new window.TradingView.widget({
-        autosize: true,
-        symbol: symbolMap[selectedSymbol]?.ticker || 'OANDA:XAUUSD',
-        interval: timeframe,
-        timezone: 'Etc/UTC',
-        theme: 'dark',
-        style: '1',
-        locale: 'en',
-        container_id: tradingViewContainer.current.id,
-        details: false,
-        hide_side_toolbar: false,
-        withdateranges: true,
-        save_image: true,
-        allow_symbol_change: true,
-        studies: ['MASimple@tv-basicstudies'],
-        enabled_features: ['study_templates'],
-        disabled_features: ['header_symbol_search', 'header_compare', 'use_localstorage_for_settings'],
-      });
-
-      tvWidgetRef.current = widget;
-    };
-
-    if (existingScript) {
-      if (window.TradingView) {
-        renderWidget();
-      } else {
-        existingScript.addEventListener('load', renderWidget, { once: true });
-      }
-      return undefined;
-    }
-
-    const script = document.createElement('script');
-    script.id = scriptId;
-    script.src = 'https://s.tradingview.com/tv.js';
-    script.async = true;
-    script.onload = renderWidget;
-    document.body.appendChild(script);
-
-    return () => {
-      if (tvWidgetRef.current) {
-        try {
-          tvWidgetRef.current.remove();
-        } catch {
-          // ignore
-        }
-      }
-    };
-  }, [selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -429,16 +356,10 @@ function App() {
   }, [signals]);
 
   const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
-
-  const handleSymbolChange = (symbol) => {
-    setSelectedSymbol(symbol);
-    setAnalysis(null);
-  };
-
-  const handleTimeframeChange = (option) => {
-    setTimeframe(option);
-    setAnalysis(null);
-  };
+  const currentPrice = Number(marketData[selectedSymbol]?.price ?? 0);
+  const chartInterval = { '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240' }[timeframe] || '1';
+  const tvSymbol = symbolMap[selectedSymbol]?.ticker || 'OANDA:XAUUSD';
+  const tvUrl = `https://s.tradingview.com/widgetembed/?frameElementId=apex-tradingview-chart&symbol=${encodeURIComponent(tvSymbol)}&interval=${chartInterval}&theme=dark&style=1&locale=en&toolbarbg=%230d1723&enable_publishing=false&hide_side_toolbar=0&hide_top_toolbar=0&save_image=1&withdateranges=1&details=1&studies=%5B%22MASimple%40tv-basicstudies%22%5D`;
 
   const persistSignal = (trade) => {
     const record = {
@@ -504,274 +425,7 @@ function App() {
 
   const totalWins = signals.filter((signal) => signal.direction === 'BUY').length;
   const totalLosses = signals.filter((signal) => signal.direction === 'SELL').length;
-
   const symbols = Object.keys(marketMeta);
-
-  const renderOverview = () => (
-    <>
-      <section className="market-grid">
-        {symbols.map((symbol) => {
-          const item = marketData[symbol];
-          const meta = marketMeta[symbol];
-          const isSelected = symbol === selectedSymbol;
-          const price = item?.price ?? 0;
-          const change = item?.change ?? 0;
-          const positive = change >= 0;
-
-          return (
-            <button
-              type="button"
-              key={symbol}
-              className={`market-card ${isSelected ? 'selected' : ''}`}
-              onClick={() => handleSymbolChange(symbol)}
-            >
-              <div className="market-header">
-                <div>
-                  <p className="market-label">{meta.label}</p>
-                  <h3>{meta.unit}</h3>
-                </div>
-                <span className="legend" style={{ background: meta.color }} />
-              </div>
-              <div className="market-price-row">
-                <strong>{formatPrice(price, symbol)}</strong>
-                <span className={positive ? 'up' : 'down'}>{positive ? '+' : ''}{change.toFixed(2)}%</span>
-              </div>
-              <p className="market-subtitle">{meta.description}</p>
-            </button>
-          );
-        })}
-      </section>
-
-      <section className="analysis-panel">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">محرك التداول</p>
-            <h2>{activeTab === 'scalp' ? 'السكالبينغ السريع 1m' : 'التحليل الذكي والسكالبينغ'}</h2>
-          </div>
-          <div className="header-actions">
-            <div className="timeframe-picker">
-              {TIMEFRAMES.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  className={option === timeframe ? 'active' : ''}
-                  onClick={() => handleTimeframeChange(option)}
-                >
-                  {option}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="signal-wrapper">
-          <div className="signal-overview">
-            <div className="signal-topline">
-              <div>
-                <p className="eyebrow">الأصل المختار</p>
-                <h3>{marketMeta[selectedSymbol].label}</h3>
-              </div>
-              <button type="button" onClick={handleAnalyze} className="analyze-btn" disabled={loadingAi}>
-                {loadingAi ? 'جارٍ التحليل...' : activeTab === 'scalp' ? 'حلّل سكالبينغ سريع' : 'حلّل الآن'}
-              </button>
-            </div>
-
-            <div className="chart-card">
-              <div className="chart-toolbar">
-                <div className="view-toggle">
-                  <button
-                    type="button"
-                    className={chartMode === 'classic' ? 'active' : ''}
-                    onClick={() => setChartMode('classic')}
-                  >
-                    الشارت العادي
-                  </button>
-                  <button
-                    type="button"
-                    className={chartMode === 'tradingview' ? 'active' : ''}
-                    onClick={() => setChartMode('tradingview')}
-                  >
-                    TradingView
-                  </button>
-                </div>
-              </div>
-
-              <div className="chart-stats">
-                <div>
-                  <span>السعر الحالي</span>
-                  <strong>{formatPrice(marketData[selectedSymbol]?.price ?? 0, selectedSymbol)}</strong>
-                </div>
-                <div>
-                  <span>RSI</span>
-                  <strong>{marketData[selectedSymbol]?.indicators?.rsi?.toFixed(1) ?? '50.0'}</strong>
-                </div>
-                <div>
-                  <span>اتجاه EMA</span>
-                  <strong>{marketData[selectedSymbol]?.indicators?.emaShort > marketData[selectedSymbol]?.indicators?.emaLong ? 'صاعد' : 'هابط'}</strong>
-                </div>
-              </div>
-
-              {chartMode === 'tradingview' ? (
-                <div className="tradingview-box">
-                  <div
-                    id="tradingview-widget-root"
-                    ref={tradingViewContainer}
-                    style={{ width: '100%', height: '100%' }}
-                  />
-                </div>
-              ) : (
-                <div className="custom-chart-card">
-                  {sparkline && (
-                    <svg viewBox={`0 0 ${sparkline.width} ${sparkline.height}`} className="sparkline" preserveAspectRatio="none">
-                      <defs>
-                        <linearGradient id="lineGlow" x1="0" x2="1">
-                          <stop offset="0%" stopColor="#7fb8ff" />
-                          <stop offset="100%" stopColor="#8ff7bb" />
-                        </linearGradient>
-                      </defs>
-                      <polyline fill="none" stroke="url(#lineGlow)" strokeWidth="3" points={sparkline.points} />
-                    </svg>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="trade-card">
-            {analysis ? (
-              <>
-                <div className="trade-head">
-                  <div>
-                    <span className="eyebrow">توصية الذكاء</span>
-                    <h3 className={analysis.direction === 'BUY' ? 'buy-text' : 'sell-text'}>
-                      {analysis.direction === 'BUY' ? 'شراء' : 'بيع'}
-                    </h3>
-                  </div>
-                  <span className="confidence">{analysis.confidence}% ثقة</span>
-                </div>
-
-                <div className="trade-grid">
-                  <div className="trade-item">
-                    <span>سعر الدخول</span>
-                    <strong>{formatPrice(analysis.entry, selectedSymbol)}</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>وقف الخسارة</span>
-                    <strong>{formatPrice(analysis.stopLoss, selectedSymbol)}</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>TP1</span>
-                    <strong>{formatPrice(analysis.tp1, selectedSymbol)}</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>TP2</span>
-                    <strong>{formatPrice(analysis.tp2, selectedSymbol)}</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>TP3</span>
-                    <strong>{formatPrice(analysis.tp3, selectedSymbol)}</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>حجم اللوت</span>
-                    <strong>{analysis.lotSize.toFixed(2)} lots</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>نقطة التعادل</span>
-                    <strong>{formatPrice(analysis.breakEven, selectedSymbol)}</strong>
-                  </div>
-                  <div className="trade-item">
-                    <span>التتبع التلقائي</span>
-                    <strong>{formatPrice(analysis.trailingStop, selectedSymbol)}</strong>
-                  </div>
-                </div>
-
-                <div className="reason-box">
-                  <p>{analysis.reason}</p>
-                </div>
-              </>
-            ) : (
-              <div className="empty-state">
-                <p>اضغط على زر «حلّل الآن» لتوليد تحليل جديد وفق السعر اللحظي.</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </section>
-    </>
-  );
-
-  const renderSignals = () => (
-    <section className="signals-panel">
-      <div className="signals-header">
-        <div>
-          <p className="eyebrow">سجل الإشارات</p>
-          <h2>الإشارات والأداء</h2>
-        </div>
-        <button type="button" className="analyze-btn small" onClick={() => setActiveTab('overview')}>
-          العودة للتحليل
-        </button>
-      </div>
-
-      <div className="stat-grid">
-        <div className="stat-box">
-          <span>إجمالي الإشارات</span>
-          <strong>{signals.length}</strong>
-        </div>
-        <div className="stat-box">
-          <span>الصفقات الصاعدة</span>
-          <strong className="up">{totalWins}</strong>
-        </div>
-        <div className="stat-box">
-          <span>الصفقات الهابطة</span>
-          <strong className="down">{totalLosses}</strong>
-        </div>
-        <div className="stat-box">
-          <span>النوع</span>
-          <strong>{activeTab === 'scalp' ? 'سكالبينغ سريع' : 'قياسي'}</strong>
-        </div>
-      </div>
-
-      <div className="signal-table">
-        {signals.length ? (
-          signals.map((signal) => (
-            <div key={signal.id} className="signal-row">
-              <div>
-                <small>{signal.createdAt}</small>
-                <div className="signal-main">
-                  <span className={`badge ${signal.direction === 'BUY' ? 'buy' : 'sell'}`}>
-                    {signal.direction === 'BUY' ? 'شراء' : 'بيع'}
-                  </span>
-                  <strong>{signal.label}</strong>
-                </div>
-              </div>
-              <div className="value-block">
-                <span>الدخول</span>
-                <strong>{formatPrice(signal.entry, signal.symbol)}</strong>
-              </div>
-              <div className="value-block">
-                <span>وقف الخسارة</span>
-                <strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong>
-              </div>
-              <div className="value-block">
-                <span>الأهداف</span>
-                <strong>
-                  {formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}
-                </strong>
-              </div>
-              <div className="value-block">
-                <span>الثقة</span>
-                <strong>{signal.confidence}%</strong>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="empty-signal-box">
-            <p>لا توجد إشارات محفوظة بعد. قم بإنشاء أول تحليل من لوحة التحليل.</p>
-          </div>
-        )}
-      </div>
-    </section>
-  );
 
   return (
     <div className="app-shell" dir="rtl">
@@ -809,12 +463,279 @@ function App() {
           className={activeTab === 'signals' ? 'nav-tab active' : 'nav-tab'}
           onClick={() => setActiveTab('signals')}
         >
-          سجل الإشارات والأداء (Signals & Analytics)
+          سجل الإشارات والأداء
         </button>
       </nav>
 
       <main className="dashboard">
-        {activeTab === 'signals' ? renderSignals() : renderOverview()}
+        {activeTab === 'signals' ? (
+          <section className="signals-panel">
+            <div className="signals-header">
+              <div>
+                <p className="eyebrow">سجل الإشارات</p>
+                <h2>الإشارات والأداء</h2>
+              </div>
+              <button type="button" className="analyze-btn small" onClick={() => setActiveTab('overview')}>
+                العودة للتحليل
+              </button>
+            </div>
+
+            <div className="stat-grid">
+              <div className="stat-box">
+                <span>إجمالي الإشارات</span>
+                <strong>{signals.length}</strong>
+              </div>
+              <div className="stat-box">
+                <span>الصفقات الصاعدة</span>
+                <strong className="up">{totalWins}</strong>
+              </div>
+              <div className="stat-box">
+                <span>الصفقات الهابطة</span>
+                <strong className="down">{totalLosses}</strong>
+              </div>
+              <div className="stat-box">
+                <span>النوع</span>
+                <strong>{activeTab === 'scalp' ? 'سكالبينغ سريع' : 'قياسي'}</strong>
+              </div>
+            </div>
+
+            <div className="signal-table">
+              {signals.length ? (
+                signals.map((signal) => (
+                  <div key={signal.id} className="signal-row">
+                    <div>
+                      <small>{signal.createdAt}</small>
+                      <div className="signal-main">
+                        <span className={`badge ${signal.direction === 'BUY' ? 'buy' : 'sell'}`}>
+                          {signal.direction === 'BUY' ? 'شراء' : 'بيع'}
+                        </span>
+                        <strong>{signal.label}</strong>
+                      </div>
+                    </div>
+                    <div className="value-block">
+                      <span>الدخول</span>
+                      <strong>{formatPrice(signal.entry, signal.symbol)}</strong>
+                    </div>
+                    <div className="value-block">
+                      <span>وقف الخسارة</span>
+                      <strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong>
+                    </div>
+                    <div className="value-block">
+                      <span>الأهداف</span>
+                      <strong>
+                        {formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}
+                      </strong>
+                    </div>
+                    <div className="value-block">
+                      <span>الثقة</span>
+                      <strong>{signal.confidence}%</strong>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="empty-signal-box">
+                  <p>لا توجد إشارات محفوظة بعد. قم بإنشاء أول تحليل من لوحة التحليل.</p>
+                </div>
+              )}
+            </div>
+          </section>
+        ) : (
+          <>
+            <section className="market-grid">
+              {symbols.map((symbol) => {
+                const item = marketData[symbol];
+                const meta = marketMeta[symbol];
+                const isSelected = symbol === selectedSymbol;
+                const price = item?.price ?? 0;
+                const change = item?.change ?? 0;
+                const positive = change >= 0;
+
+                return (
+                  <button
+                    type="button"
+                    key={symbol}
+                    className={`market-card ${isSelected ? 'selected' : ''}`}
+                    onClick={() => setSelectedSymbol(symbol)}
+                  >
+                    <div className="market-header">
+                      <div>
+                        <p className="market-label">{meta.label}</p>
+                        <h3>{meta.unit}</h3>
+                      </div>
+                      <span className="legend" style={{ background: meta.color }} />
+                    </div>
+                    <div className="market-price-row">
+                      <strong>{formatPrice(price, symbol)}</strong>
+                      <span className={positive ? 'up' : 'down'}>{positive ? '+' : ''}{change.toFixed(2)}%</span>
+                    </div>
+                    <p className="market-subtitle">{meta.description}</p>
+                  </button>
+                );
+              })}
+            </section>
+
+            <section className="analysis-panel">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">محرك التداول</p>
+                  <h2>{activeTab === 'scalp' ? 'السكالبينغ السريع 1m' : 'التحليل الذكي والسكالبينغ'}</h2>
+                </div>
+                <div className="header-actions">
+                  <div className="timeframe-picker">
+                    {TIMEFRAMES.map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        className={option === timeframe ? 'active' : ''}
+                        onClick={() => {
+                          setTimeframe(option);
+                          setAnalysis(null);
+                        }}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="signal-wrapper">
+                <div className="signal-overview">
+                  <div className="signal-topline">
+                    <div>
+                      <p className="eyebrow">الأصل المختار</p>
+                      <h3>{marketMeta[selectedSymbol].label}</h3>
+                    </div>
+                    <button type="button" onClick={handleAnalyze} className="analyze-btn" disabled={loadingAi}>
+                      {loadingAi ? 'جارٍ التحليل...' : activeTab === 'scalp' ? 'حلّل سكالبينغ سريع' : 'حلّل الآن'}
+                    </button>
+                  </div>
+
+                  <div className="chart-card">
+                    <div className="chart-toolbar">
+                      <div className="view-toggle">
+                        <button
+                          type="button"
+                          className={chartMode === 'classic' ? 'active' : ''}
+                          onClick={() => setChartMode('classic')}
+                        >
+                          الش��رت العادي
+                        </button>
+                        <button
+                          type="button"
+                          className={chartMode === 'tradingview' ? 'active' : ''}
+                          onClick={() => setChartMode('tradingview')}
+                        >
+                          TradingView
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="chart-stats">
+                      <div>
+                        <span>السعر الحالي</span>
+                        <strong>{formatPrice(currentPrice, selectedSymbol)}</strong>
+                      </div>
+                      <div>
+                        <span>RSI</span>
+                        <strong>{marketData[selectedSymbol]?.indicators?.rsi?.toFixed(1) ?? '50.0'}</strong>
+                      </div>
+                      <div>
+                        <span>اتجاه EMA</span>
+                        <strong>{marketData[selectedSymbol]?.indicators?.emaShort > marketData[selectedSymbol]?.indicators?.emaLong ? 'صاعد' : 'هابط'}</strong>
+                      </div>
+                    </div>
+
+                    {chartMode === 'tradingview' ? (
+                      <div className="tradingview-box">
+                        <iframe
+                          title="TradingView Chart"
+                          src={tvUrl}
+                          className="tradingview-frame"
+                          loading="lazy"
+                          allowFullScreen
+                        />
+                      </div>
+                    ) : (
+                      <div className="custom-chart-card">
+                        {sparkline && (
+                          <svg viewBox={`0 0 ${sparkline.width} ${sparkline.height}`} className="sparkline" preserveAspectRatio="none">
+                            <defs>
+                              <linearGradient id="lineGlow" x1="0" x2="1">
+                                <stop offset="0%" stopColor="#7fb8ff" />
+                                <stop offset="100%" stopColor="#8ff7bb" />
+                              </linearGradient>
+                            </defs>
+                            <polyline fill="none" stroke="url(#lineGlow)" strokeWidth="3" points={sparkline.points} />
+                          </svg>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="trade-card">
+                  {analysis ? (
+                    <>
+                      <div className="trade-head">
+                        <div>
+                          <span className="eyebrow">توصية الذكاء</span>
+                          <h3 className={analysis.direction === 'BUY' ? 'buy-text' : 'sell-text'}>
+                            {analysis.direction === 'BUY' ? 'شراء' : 'بيع'}
+                          </h3>
+                        </div>
+                        <span className="confidence">{analysis.confidence}% ثقة</span>
+                      </div>
+
+                      <div className="trade-grid">
+                        <div className="trade-item">
+                          <span>سعر الدخول</span>
+                          <strong>{formatPrice(analysis.entry, selectedSymbol)}</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>وقف الخسارة</span>
+                          <strong>{formatPrice(analysis.stopLoss, selectedSymbol)}</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>TP1</span>
+                          <strong>{formatPrice(analysis.tp1, selectedSymbol)}</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>TP2</span>
+                          <strong>{formatPrice(analysis.tp2, selectedSymbol)}</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>TP3</span>
+                          <strong>{formatPrice(analysis.tp3, selectedSymbol)}</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>حجم اللوت</span>
+                          <strong>{analysis.lotSize.toFixed(2)} lots</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>نقطة التعادل</span>
+                          <strong>{formatPrice(analysis.breakEven, selectedSymbol)}</strong>
+                        </div>
+                        <div className="trade-item">
+                          <span>التتبع التلقائي</span>
+                          <strong>{formatPrice(analysis.trailingStop, selectedSymbol)}</strong>
+                        </div>
+                      </div>
+
+                      <div className="reason-box">
+                        <p>{analysis.reason}</p>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-state">
+                      <p>اضغط على زر ��حلّل الآن» لتوليد تحليل جديد وفق السعر اللحظي.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          </>
+        )}
       </main>
     </div>
   );
