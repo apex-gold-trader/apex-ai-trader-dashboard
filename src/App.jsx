@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
@@ -9,6 +9,14 @@ const marketMeta = {
   EURUSD: { label: 'اليورو/الدولار', unit: 'EURUSD', color: '#58d68d', description: 'EUR/USD' },
   ETHUSD: { label: 'إيثيريوم', unit: 'ETHUSD', color: '#8a7dff', description: 'ETH/USD' },
   NAS100: { label: 'ناسداك 100', unit: 'NAS100', color: '#7cc7ff', description: 'المؤشر' },
+};
+
+const symbolMap = {
+  XAUUSD: { market: 'forex', ticker: 'OANDA:XAUUSD' },
+  BTCUSD: { market: 'crypto', ticker: 'BINANCE:BTCUSDT' },
+  EURUSD: { market: 'forex', ticker: 'FX:EURUSD' },
+  ETHUSD: { market: 'crypto', ticker: 'BINANCE:ETHUSDT' },
+  NAS100: { market: 'america', ticker: 'NASDAQ:IXIC' },
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -137,84 +145,61 @@ function generateMarketData() {
   return result;
 }
 
-async function fetchGoldPrice() {
-  const response = await fetch('https://api.gold-api.com/price/XAU');
-  if (!response.ok) throw new Error('Gold API unavailable');
-  const data = await response.json();
-  return Number(toNumber(data.price));
+async function fetchTradingViewQuote(symbol) {
+  const mapping = symbolMap[symbol];
+  if (!mapping) return null;
+
+  try {
+    const response = await fetch(`https://scanner.tradingview.com/${mapping.market}/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols: { tickers: [mapping.ticker] },
+      }),
+    });
+
+    if (!response.ok) return null;
+
+    const json = await response.json();
+    const item = json?.data?.find((row) => row?.s === mapping.ticker) || json?.data?.[0];
+    const priceValue = item?.c ?? item?.lp ?? item?.p ?? item?.last ?? item?.last_price ?? item?.v ?? null;
+
+    const parsedPrice = Number(priceValue);
+    return Number.isFinite(parsedPrice) && parsedPrice > 0 ? parsedPrice : null;
+  } catch {
+    return null;
+  }
 }
 
-async function fetchEurUsdPrice() {
-  const response = await fetch('https://api.exchangerate.host/convert?from=EUR&to=USD');
-  if (!response.ok) throw new Error('FX API unavailable');
-  const data = await response.json();
-  return Number(toNumber(data.result));
-}
-
-async function fetchBinancePrice(symbol) {
-  const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`);
-  if (!response.ok) throw new Error(`${symbol} API unavailable`);
-  const data = await response.json();
-  return Number(toNumber(data.price));
-}
-
-async function fetchNasdaqPrice() {
-  const response = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d');
-  if (!response.ok) throw new Error('NASDAQ API unavailable');
-  const data = await response.json();
-  const result = data?.chart?.result?.[0];
-  const lastPrice = result?.meta?.regularMarketPrice ?? result?.meta?.previousClose ?? 19000;
-  return Number(lastPrice);
-}
-
-async function fetchLiveMarketData() {
-  const [btc, eth, gold, eurUsd, nasdaq] = await Promise.allSettled([
-    fetchBinancePrice('BTCUSDT'),
-    fetchBinancePrice('ETHUSDT'),
-    fetchGoldPrice(),
-    fetchEurUsdPrice(),
-    fetchNasdaqPrice(),
-  ]);
-
+async function fetchLiveMarketDataFromTradingView() {
   const fallback = generateMarketData();
+  const records = await Promise.allSettled(
+    Object.keys(marketMeta).map(async (symbol) => {
+      const quote = await fetchTradingViewQuote(symbol);
+      return { symbol, quote };
+    }),
+  );
 
-  return {
-    BTCUSD: {
-      price: btc.status === 'fulfilled' ? btc.value : fallback.BTCUSD.price,
-      change: fallback.BTCUSD.change,
-      series: fallback.BTCUSD.series,
-      indicators: fallback.BTCUSD.indicators,
+  const next = {};
+
+  records.forEach((result) => {
+    if (result.status !== 'fulfilled') return;
+    const { symbol, quote } = result.value;
+    if (!quote) return;
+
+    const base = fallback[symbol];
+    next[symbol] = {
+      ...base,
+      price: Number(quote),
       updatedAt: Date.now(),
-    },
-    ETHUSD: {
-      price: eth.status === 'fulfilled' ? eth.value : fallback.ETHUSD.price,
-      change: fallback.ETHUSD.change,
-      series: fallback.ETHUSD.series,
-      indicators: fallback.ETHUSD.indicators,
-      updatedAt: Date.now(),
-    },
-    XAUUSD: {
-      price: gold.status === 'fulfilled' ? gold.value : fallback.XAUUSD.price,
-      change: fallback.XAUUSD.change,
-      series: fallback.XAUUSD.series,
-      indicators: fallback.XAUUSD.indicators,
-      updatedAt: Date.now(),
-    },
-    EURUSD: {
-      price: eurUsd.status === 'fulfilled' ? eurUsd.value : fallback.EURUSD.price,
-      change: fallback.EURUSD.change,
-      series: fallback.EURUSD.series,
-      indicators: fallback.EURUSD.indicators,
-      updatedAt: Date.now(),
-    },
-    NAS100: {
-      price: nasdaq.status === 'fulfilled' ? nasdaq.value : fallback.NAS100.price,
-      change: fallback.NAS100.change,
-      series: fallback.NAS100.series,
-      indicators: fallback.NAS100.indicators,
-      updatedAt: Date.now(),
-    },
-  };
+    };
+  });
+
+  Object.keys(fallback).forEach((symbol) => {
+    if (!next[symbol]) next[symbol] = fallback[symbol];
+  });
+
+  return next;
 }
 
 function buildSparkline(series) {
@@ -236,8 +221,8 @@ function buildSparkline(series) {
   return { points, width, height };
 }
 
-function getScalpStopDistance(symbol, entry) {
-  const distanceMap = {
+function getScalpStopDistance(symbol) {
+  const map = {
     XAUUSD: 1.8,
     BTCUSD: 2.4,
     ETHUSD: 2.1,
@@ -245,8 +230,7 @@ function getScalpStopDistance(symbol, entry) {
     NAS100: 2.6,
   };
 
-  const value = distanceMap[symbol] ?? 1.5;
-  return clamp(value, 1.2, 3);
+  return clamp(map[symbol] ?? 1.5, 1.2, 3);
 }
 
 function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
@@ -280,8 +264,8 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
   }[symbol] ?? 0.01;
 
   const isScalp = mode === 'scalp';
-  const stopDistance = isScalp ? getScalpStopDistance(symbol, entry) : entry * volatilityBuffer;
-  const tpDistance = isScalp ? stopDistance * (1.8 + (timeframe === '1m' ? 0.7 : 0.25)) : stopDistance * 1.8;
+  const stopDistance = isScalp ? getScalpStopDistance(symbol) : entry * volatilityBuffer;
+  const tpDistance = isScalp ? stopDistance * (1.8 + (timeframe === '1m' ? 0.75 : 0.25)) : stopDistance * 1.8;
 
   const stopLoss = direction === 'BUY' ? entry - stopDistance : entry + stopDistance;
   const tp1 = direction === 'BUY' ? entry + tpDistance * 0.75 : entry - tpDistance * 0.75;
@@ -300,7 +284,7 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
   const confidence = clamp(Math.round(70 + (Math.abs(rsi - 50) * 0.7) + (direction === 'BUY' ? 8 : -8)), 68, 96);
 
   const reasons = {
-    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}).` ,
+    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}).`,
     SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}).`,
   };
 
@@ -324,6 +308,8 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
 }
 
 function App() {
+  const tradingViewContainer = useRef(null);
+  const tvWidgetRef = useRef(null);
   const [timeframe, setTimeframe] = useState('1m');
   const [marketData, setMarketData] = useState(generateMarketData());
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
@@ -331,7 +317,8 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState(Date.now());
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
-  const [chartMode, setChartMode] = useState('classic');
+  const [chartMode, setChartMode] = useState('tradingview');
+  const [loadingAi, setLoadingAi] = useState(false);
   const [signals, setSignals] = useState(() => {
     if (typeof window === 'undefined') return [];
     try {
@@ -347,7 +334,7 @@ function App() {
 
     const refresh = async () => {
       try {
-        const live = await fetchLiveMarketData();
+        const live = await fetchLiveMarketDataFromTradingView();
         if (!mounted) return;
         setMarketData(live);
         setLastUpdated(Date.now());
@@ -360,13 +347,80 @@ function App() {
     };
 
     refresh();
-    const interval = setInterval(refresh, 8000);
+    const interval = setInterval(refresh, 6000);
 
     return () => {
       mounted = false;
       clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    if (!tradingViewContainer.current) return undefined;
+
+    const scriptId = 'tradingview-widget-script';
+    const existingScript = document.getElementById(scriptId);
+
+    const renderWidget = () => {
+      if (!window.TradingView || !tradingViewContainer.current) return;
+
+      if (tvWidgetRef.current) {
+        try {
+          tvWidgetRef.current.remove();
+        } catch {
+          // ignore
+        }
+      }
+
+      const widget = new window.TradingView.widget({
+        autosize: true,
+        symbol: symbolMap[selectedSymbol]?.ticker || 'OANDA:XAUUSD',
+        interval: timeframe,
+        timezone: 'Etc/UTC',
+        theme: 'dark',
+        style: '1',
+        locale: 'en',
+        container_id: tradingViewContainer.current.id,
+        details: false,
+        hide_side_toolbar: false,
+        withdateranges: true,
+        save_image: true,
+        allow_symbol_change: true,
+        studies: ['MASimple@tv-basicstudies'],
+        enabled_features: ['study_templates'],
+        disabled_features: ['header_symbol_search', 'header_compare', 'use_localstorage_for_settings'],
+      });
+
+      tvWidgetRef.current = widget;
+    };
+
+    if (existingScript) {
+      if (window.TradingView) {
+        renderWidget();
+      } else {
+        existingScript.addEventListener('load', renderWidget, { once: true });
+      }
+      return undefined;
+    }
+
+    const script = document.createElement('script');
+    script.id = scriptId;
+    script.src = 'https://s.tradingview.com/tv.js';
+    script.async = true;
+    script.onload = renderWidget;
+    document.body.appendChild(script);
+
+    return () => {
+      if (tvWidgetRef.current) {
+        try {
+          tvWidgetRef.current.remove();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -386,32 +440,66 @@ function App() {
     setAnalysis(null);
   };
 
-  const handleAnalyze = () => {
-    const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
-    const generated = analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
-    if (!generated) return;
-
-    setAnalysis(generated);
+  const persistSignal = (trade) => {
     const record = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       symbol: selectedSymbol,
       label: marketMeta[selectedSymbol].label,
-      direction: generated.direction,
-      entry: generated.entry,
-      stopLoss: generated.stopLoss,
-      tp1: generated.tp1,
-      tp2: generated.tp2,
-      tp3: generated.tp3,
-      confidence: generated.confidence,
-      timeframe: generated.timeframe,
-      strategy: generated.strategy,
+      direction: trade.direction,
+      entry: trade.entry,
+      stopLoss: trade.stopLoss,
+      tp1: trade.tp1,
+      tp2: trade.tp2,
+      tp3: trade.tp3,
+      confidence: trade.confidence,
+      timeframe: trade.timeframe,
+      strategy: trade.strategy,
       status: 'open',
-      mode: generated.mode,
+      mode: trade.mode,
       createdAt: new Date().toLocaleString('ar-SA'),
     };
 
-    setSignals((previous) => [record, ...previous].slice(0, 12));
-    setActiveTab('signals');
+    setSignals((previous) => [record, ...previous].slice(0, 14));
+  };
+
+  const handleAnalyze = async () => {
+    const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
+    const current = marketData[selectedSymbol];
+
+    setLoadingAi(true);
+
+    try {
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: selectedSymbol,
+          timeframe,
+          mode,
+          current,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Unexpected response from AI API');
+      }
+
+      const data = await response.json();
+      const trade = data.trade || analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
+      if (!trade) return;
+
+      setAnalysis(trade);
+      persistSignal(trade);
+      setActiveTab('signals');
+    } catch {
+      const fallback = analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
+      if (fallback) {
+        setAnalysis(fallback);
+        persistSignal(fallback);
+      }
+    } finally {
+      setLoadingAi(false);
+    }
   };
 
   const totalWins = signals.filter((signal) => signal.direction === 'BUY').length;
@@ -483,8 +571,8 @@ function App() {
                 <p className="eyebrow">الأصل المختار</p>
                 <h3>{marketMeta[selectedSymbol].label}</h3>
               </div>
-              <button type="button" onClick={handleAnalyze} className="analyze-btn">
-                {activeTab === 'scalp' ? 'حلّل سكالبينغ سريع' : 'حلّل الآن'}
+              <button type="button" onClick={handleAnalyze} className="analyze-btn" disabled={loadingAi}>
+                {loadingAi ? 'جارٍ التحليل...' : activeTab === 'scalp' ? 'حلّل سكالبينغ سريع' : 'حلّل الآن'}
               </button>
             </div>
 
@@ -525,11 +613,10 @@ function App() {
 
               {chartMode === 'tradingview' ? (
                 <div className="tradingview-box">
-                  <iframe
-                    title="TradingView"
-                    src={`https://s.tradingview.com/widgetembed/?frameElementId=tradingview_1&symbol=${selectedSymbol}&interval=1&theme=dark&style=1&locale=en&toolbarbg=%230d1723&enable_publishing=false&hide_side_toolbar=0&hide_top_toolbar=0&save_image=1&withdateranges=1`}
-                    className="tradingview-frame"
-                    loading="lazy"
+                  <div
+                    id="tradingview-widget-root"
+                    ref={tradingViewContainer}
+                    style={{ width: '100%', height: '100%' }}
                   />
                 </div>
               ) : (
