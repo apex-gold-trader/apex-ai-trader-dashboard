@@ -201,9 +201,8 @@ function App() {
 
       for (const item of MARKET_DEFS) {
         const previousPrice = Number(liveDataRef.current[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
-
         const sourcePrice = await fetchTradingViewPrice(item.symbol);
-        const basePrice = normalizePrice(sourcePrice) ?? previousPrice || BASELINE_PRICES[item.symbol] || 1;
+        const basePrice = normalizePrice(sourcePrice) ?? previousPrice ?? BASELINE_PRICES[item.symbol] ?? 1;
         const nextPrice = computeLiveTick(item.symbol, basePrice, Date.now());
 
         if (!cancelled) {
@@ -238,7 +237,7 @@ function App() {
   }, [signals]);
 
   const currentLivePrice = Number(liveData[selectedSymbol]?.price ?? BASELINE_PRICES[selectedSymbol] ?? 0);
-  const currentChartSeries = chartSeriesRef.current[selectedSymbol] || buildSeriesFromPrice(currentLivePrice || BASELINE_PRICES[selectedSymbol] || 1, selectedSymbol, 24);
+  const currentChartSeries = chartSeriesRef.current[selectedSymbol] ?? buildSeriesFromPrice(currentLivePrice || BASELINE_PRICES[selectedSymbol] || 1, selectedSymbol, 24);
 
   const sparkline = useMemo(() => {
     const values = currentChartSeries;
