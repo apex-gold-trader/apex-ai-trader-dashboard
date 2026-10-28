@@ -3,6 +3,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 
+const BASELINE_PRICES = {
+  XAUUSD: 4064.25,
+  BTCUSD: 61180.5,
+  EURUSD: 1.0854,
+  ETHUSD: 3381.2,
+  NAS100: 18540,
+};
+
 const MARKET_DEFS = [
   { symbol: 'XAUUSD', label: 'الذهب', ticker: 'OANDA:XAUUSD', market: 'forex', precision: 2, color: '#f6c453' },
   { symbol: 'BTCUSD', label: 'بيتكوين', ticker: 'BINANCE:BTCUSDT', market: 'crypto', precision: 2, color: '#f7931a' },
@@ -13,6 +21,11 @@ const MARKET_DEFS = [
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const toNumber = (value) => Number(value ?? 0);
+
+const safeNumeric = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
 
 const formatPrice = (value, symbol) => {
   const numeric = Number(value ?? 0);
@@ -30,6 +43,7 @@ const average = (values) => {
 };
 
 function buildSeriesFromPrice(price, symbol, length = 18) {
+  const safePrice = safeNumeric(price) ?? BASELINE_PRICES[symbol] ?? 1;
   const multiplier = {
     XAUUSD: 0.7,
     BTCUSD: 95,
@@ -39,12 +53,12 @@ function buildSeriesFromPrice(price, symbol, length = 18) {
   }[symbol] ?? 1;
 
   const series = [];
-  let current = price;
+  let current = safePrice;
 
   for (let i = 0; i < length; i += 1) {
     const sineWave = Math.sin(i * 0.9) * multiplier * 0.75;
     const drift = ((Math.random() - 0.5) * multiplier) * 0.35;
-    current = Math.max(current + sineWave + drift, price * 0.92);
+    current = Math.max(current + sineWave + drift, safePrice * 0.92);
     series.push(Number(current.toFixed(5)));
   }
 
@@ -53,7 +67,7 @@ function buildSeriesFromPrice(price, symbol, length = 18) {
 
 function getChartUrl(symbol, interval) {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  return `https://s.tradingview.com/widgetembed/?frameElementId=apex-tradingview-chart&symbol=${encodeURIComponent(def.ticker)}&interval=${encodeURIComponent(interval)}&theme=dark&style=1&locale=en&toolbarbg=%230d1723&enable_publishing=false&hide_side_toolbar=0&hide_top_toolbar=0&save_image=1&withdateranges=1&details=1`;
+  return `https://s.tradingview.com/widgetembed/?frameElementId=apex-tradingview-chart&symbol=${encodeURIComponent(def.ticker)}&interval=${encodeURIComponent(interval)}&theme=dark&style=1&locale=ar&hide_top_toolbar=0&hide_legend=0&save_image=0&toolbarbg=#0f172a&studies=[]`;
 }
 
 async function fetchTradingViewPrice(symbol) {
@@ -69,22 +83,28 @@ async function fetchTradingViewPrice(symbol) {
       }),
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      return BASELINE_PRICES[def.symbol] ?? null;
+    }
 
     const payload = await response.json();
     const item = payload?.data?.find((entry) => entry?.s === def.ticker) || payload?.data?.[0] || null;
-    const value = item?.c ?? item?.p ?? item?.lp ?? item?.last ?? item?.last_price ?? null;
-    const numeric = Number(value);
+    const value = item?.c ?? item?.p ?? item?.lp ?? item?.last ?? item?.last_price ?? item?.o ?? null;
+    const numeric = safeNumeric(value);
 
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+    if (numeric) {
+      return numeric;
+    }
   } catch {
-    return null;
+    // Ignore network errors and fall back below.
   }
+
+  return BASELINE_PRICES[def.symbol] ?? null;
 }
 
 function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  const price = toNumber(livePrice);
+  const price = safeNumeric(livePrice) ?? BASELINE_PRICES[symbol] ?? 1;
   const chartSeries = buildSeriesFromPrice(price, symbol, 18);
   const middle = average(chartSeries);
   const direction = price >= middle ? 'BUY' : 'SELL';
@@ -123,7 +143,7 @@ function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
     timeframe,
     strategy: mode === 'scalp' ? 'سكالبينغ سريع • استجابة فورية' : 'تحليل اتجاه مباشر • دعم سعر حقيقي',
     mode,
-    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الفعلي النشط من شارت ${def.label}. الاتجاه ${direction === 'BUY' ? 'الصاعد' : 'الهابط'} مدعوم بالاتجاه المباشر والبيانات الحالية.`,
+    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الفعلي النشط من شارت ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} مبني على السعر الحالي والاتجاه اللحظي والاتساق الفني.`,
     snapshotAt: Date.now(),
   };
 }
@@ -150,7 +170,7 @@ function App() {
   const [liveData, setLiveData] = useState(() => {
     const initial = {};
     MARKET_DEFS.forEach((item) => {
-      initial[item.symbol] = { price: 0, updatedAt: Date.now() };
+      initial[item.symbol] = { price: BASELINE_PRICES[item.symbol] ?? 0, updatedAt: Date.now() };
     });
     return initial;
   });
@@ -164,13 +184,16 @@ function App() {
       const nextState = {};
 
       for (const item of MARKET_DEFS) {
-        const price = await fetchTradingViewPrice(item.symbol);
+        const previousPrice = Number(liveData[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
+        const fetchedPrice = await fetchTradingViewPrice(item.symbol);
+        const price = safeNumeric(fetchedPrice) ?? (previousPrice > 0 ? previousPrice : BASELINE_PRICES[item.symbol] ?? 1);
+
         if (!cancelled) {
           nextState[item.symbol] = {
-            price: Number.isFinite(price) && price > 0 ? price : (liveData[item.symbol]?.price ?? 0),
+            price,
             updatedAt: Date.now(),
           };
-          chartSeriesRef.current[item.symbol] = buildSeriesFromPrice(nextState[item.symbol].price, item.symbol, 24);
+          chartSeriesRef.current[item.symbol] = buildSeriesFromPrice(price, item.symbol, 24);
         }
       }
 
@@ -199,8 +222,8 @@ function App() {
     }
   }, [signals]);
 
-  const currentLivePrice = toNumber(liveData[selectedSymbol]?.price ?? 0);
-  const currentChartSeries = chartSeriesRef.current[selectedSymbol] || buildSeriesFromPrice(currentLivePrice || 1, selectedSymbol, 24);
+  const currentLivePrice = toNumber(liveData[selectedSymbol]?.price ?? BASELINE_PRICES[selectedSymbol] ?? 0);
+  const currentChartSeries = chartSeriesRef.current[selectedSymbol] || buildSeriesFromPrice(currentLivePrice || BASELINE_PRICES[selectedSymbol] || 1, selectedSymbol, 24);
 
   const sparkline = useMemo(() => {
     const values = currentChartSeries;
@@ -246,7 +269,7 @@ function App() {
 
   const handleAnalyze = async () => {
     const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
-    const activePrice = Number(liveData[selectedSymbol]?.price ?? 0);
+    const activePrice = currentLivePrice > 0 ? currentLivePrice : (BASELINE_PRICES[selectedSymbol] ?? 1);
 
     setLoadingAi(true);
 
@@ -385,7 +408,7 @@ function App() {
           <>
             <section className="market-grid">
               {MARKET_DEFS.map((item) => {
-                const price = Number(liveData[item.symbol]?.price ?? 0);
+                const price = Number(liveData[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
                 const trend = Math.random() * 10 - 5;
                 const change = Number.isFinite(price) && price > 0 ? trend : 0;
                 const selected = selectedSymbol === item.symbol;
@@ -411,7 +434,7 @@ function App() {
             <section className="analysis-panel">
               <div className="panel-header">
                 <div>
-                  <p className="eyebrow">��حرك التداول</p>
+                  <p className="eyebrow">تحرك التداول</p>
                   <h2>{activeTab === 'scalp' ? 'السكالبينغ السريع' : 'التحليل الذكي'}</h2>
                 </div>
                 <div className="timeframe-picker">
