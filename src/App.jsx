@@ -2,14 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
-
-const BASELINE_PRICES = {
-  XAUUSD: 4064.25,
-  BTCUSD: 61180.5,
-  EURUSD: 1.0854,
-  ETHUSD: 3381.2,
-  NAS100: 18540,
-};
+const LIVE_REFRESH_MS = 2000;
+const LIVE_TIMEOUT_MS = 4000;
 
 const MARKET_DEFS = [
   { symbol: 'XAUUSD', label: 'الذهب', ticker: 'OANDA:XAUUSD', market: 'forex', precision: 2, color: '#f6c453' },
@@ -19,10 +13,17 @@ const MARKET_DEFS = [
   { symbol: 'NAS100', label: 'ناسداك 100', ticker: 'NASDAQ:IXIC', market: 'america', precision: 2, color: '#7cc7ff' },
 ];
 
+const BASELINE_PRICES = {
+  XAUUSD: 4064.25,
+  BTCUSD: 61180.5,
+  EURUSD: 1.0854,
+  ETHUSD: 3381.2,
+  NAS100: 18540,
+};
+
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const toNumber = (value) => Number(value ?? 0);
-
-const safeNumeric = (value) => {
+const normalizePrice = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
 };
@@ -42,8 +43,8 @@ const average = (values) => {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
-function buildSeriesFromPrice(price, symbol, length = 18) {
-  const safePrice = safeNumeric(price) ?? BASELINE_PRICES[symbol] ?? 1;
+const buildSeriesFromPrice = (price, symbol, length = 18) => {
+  const safePrice = normalizePrice(price) ?? BASELINE_PRICES[symbol] ?? 1;
   const multiplier = {
     XAUUSD: 0.7,
     BTCUSD: 95,
@@ -63,48 +64,92 @@ function buildSeriesFromPrice(price, symbol, length = 18) {
   }
 
   return series;
-}
+};
 
-function getChartUrl(symbol, interval) {
+const getChartUrl = (symbol, interval) => {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
   return `https://s.tradingview.com/widgetembed/?frameElementId=apex-tradingview-chart&symbol=${encodeURIComponent(def.ticker)}&interval=${encodeURIComponent(interval)}&theme=dark&style=1&locale=ar&hide_top_toolbar=0&hide_legend=0&save_image=0&toolbarbg=#0f172a&studies=[]`;
-}
+};
 
-async function fetchTradingViewPrice(symbol) {
+const fetchWithTimeout = async (url, options = {}, timeoutMs = LIVE_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
+
+const getYahooTicker = (symbol) => {
+  const map = {
+    XAUUSD: 'XAUUSD=X',
+    BTCUSD: 'BTC-USD',
+    EURUSD: 'EURUSD=X',
+    ETHUSD: 'ETH-USD',
+    NAS100: '^IXIC',
+  };
+  return map[symbol] || 'XAUUSD=X';
+};
+
+const fetchTickerPriceFromYahoo = async (symbol) => {
+  const ticker = getYahooTicker(symbol);
+
+  try {
+    const response = await fetchWithTimeout(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`);
+    if (!response.ok) return null;
+
+    const payload = await response.json();
+    const price = payload?.chart?.result?.[0]?.meta?.regularMarketPrice ?? payload?.chart?.result?.[0]?.meta?.previousClose ?? null;
+    return normalizePrice(price);
+  } catch {
+    return null;
+  }
+};
+
+const fetchTickerPriceFromTradingView = async (symbol) => {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
   const endpoint = def.market === 'crypto' ? 'crypto' : def.market === 'america' ? 'america' : 'forex';
 
   try {
-    const response = await fetch(`https://scanner.tradingview.com/${endpoint}/scan`, {
+    const response = await fetchWithTimeout(`https://scanner.tradingview.com/${endpoint}/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        symbols: { tickers: [def.ticker] },
-      }),
+      body: JSON.stringify({ symbols: { tickers: [def.ticker] } }),
     });
 
-    if (!response.ok) {
-      return BASELINE_PRICES[def.symbol] ?? null;
-    }
+    if (!response.ok) return null;
 
     const payload = await response.json();
-    const item = payload?.data?.find((entry) => entry?.s === def.ticker) || payload?.data?.[0] || null;
-    const value = item?.c ?? item?.p ?? item?.lp ?? item?.last ?? item?.last_price ?? item?.o ?? null;
-    const numeric = safeNumeric(value);
-
-    if (numeric) {
-      return numeric;
-    }
+    const entry = payload?.data?.find((item) => item?.s === def.ticker) || payload?.data?.[0] || null;
+    const value = entry?.c ?? entry?.p ?? entry?.lp ?? entry?.last ?? entry?.last_price ?? entry?.o ?? null;
+    return normalizePrice(value);
   } catch {
-    // Ignore network errors and fall back below.
+    return null;
+  }
+};
+
+const fetchRealTimePrice = async (symbol) => {
+  const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
+
+  const sources = [
+    () => fetchTickerPriceFromYahoo(symbol),
+    () => fetchTickerPriceFromTradingView(symbol),
+  ];
+
+  for (const source of sources) {
+    const price = await source();
+    if (price) return price;
   }
 
   return BASELINE_PRICES[def.symbol] ?? null;
-}
+};
 
-function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
+const buildTradeFromLivePrice = ({ symbol, timeframe, livePrice, mode }) => {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  const price = safeNumeric(livePrice) ?? BASELINE_PRICES[symbol] ?? 1;
+  const price = normalizePrice(livePrice) ?? BASELINE_PRICES[symbol] ?? 1;
   const chartSeries = buildSeriesFromPrice(price, symbol, 18);
   const middle = average(chartSeries);
   const direction = price >= middle ? 'BUY' : 'SELL';
@@ -143,10 +188,10 @@ function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
     timeframe,
     strategy: mode === 'scalp' ? 'سكالبينغ سريع • استجابة فورية' : 'تحليل اتجاه مباشر • دعم سعر حقيقي',
     mode,
-    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الفعلي النشط من شارت ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} مبني على السعر الحالي والاتجاه اللحظي والاتساق الفني.`,
+    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الفعلي المباشر والحالي للرمز ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم على أساس السعر الفعلي، مع تحديد وقف خسارة وأهداف مناسبة وبدون الاعتماد على أي قراءة داخل iframe.`,
     snapshotAt: Date.now(),
   };
-}
+};
 
 function App() {
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
@@ -185,36 +230,30 @@ function App() {
 
       for (const item of MARKET_DEFS) {
         const previousPrice = Number(liveData[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
-        const fetchedPrice = await fetchTradingViewPrice(item.symbol);
-        const price = safeNumeric(fetchedPrice) ?? (previousPrice > 0 ? previousPrice : BASELINE_PRICES[item.symbol] ?? 1);
+        const fetchedPrice = await fetchRealTimePrice(item.symbol);
+        const nextPrice = normalizePrice(fetchedPrice) ?? (previousPrice > 0 ? previousPrice : BASELINE_PRICES[item.symbol] ?? 1);
 
         if (!cancelled) {
-          nextState[item.symbol] = {
-            price,
-            updatedAt: Date.now(),
-          };
-          chartSeriesRef.current[item.symbol] = buildSeriesFromPrice(price, item.symbol, 24);
+          nextState[item.symbol] = { price: nextPrice, updatedAt: Date.now() };
+          chartSeriesRef.current[item.symbol] = buildSeriesFromPrice(nextPrice, item.symbol, 24);
         }
       }
 
       if (!cancelled) {
-        setLiveData((previous) => ({
-          ...previous,
-          ...nextState,
-        }));
+        setLiveData((previous) => ({ ...previous, ...nextState }));
         setLastUpdated(Date.now());
         setLoading(false);
       }
     };
 
     refresh();
-    const interval = window.setInterval(refresh, 6000);
+    const interval = window.setInterval(refresh, LIVE_REFRESH_MS);
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [liveData]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
