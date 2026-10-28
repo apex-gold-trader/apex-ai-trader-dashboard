@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 const LIVE_REFRESH_MS = 1000;
-const LIVE_TIMEOUT_MS = 4000;
 
 const MARKET_DEFS = [
   { symbol: 'XAUUSD', label: 'الذهب', ticker: 'OANDA:XAUUSD', market: 'forex', precision: 2, color: '#f6c453' },
@@ -22,7 +21,6 @@ const BASELINE_PRICES = {
 };
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-const toNumber = (value) => Number(value ?? 0);
 const normalizePrice = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
@@ -43,7 +41,7 @@ const average = (values) => {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
-const buildSeriesFromPrice = (price, symbol, length = 18) => {
+function buildSeriesFromPrice(price, symbol, length = 18) {
   const safePrice = normalizePrice(price) ?? BASELINE_PRICES[symbol] ?? 1;
   const multiplier = {
     XAUUSD: 0.7,
@@ -57,64 +55,26 @@ const buildSeriesFromPrice = (price, symbol, length = 18) => {
   let current = safePrice;
 
   for (let i = 0; i < length; i += 1) {
-    const sineWave = Math.sin(i * 0.9) * multiplier * 0.75;
+    const wave = Math.sin(i * 0.9) * multiplier * 0.75;
     const drift = ((Math.random() - 0.5) * multiplier) * 0.35;
-    current = Math.max(current + sineWave + drift, safePrice * 0.92);
+    current = Math.max(current + wave + drift, safePrice * 0.92);
     series.push(Number(current.toFixed(5)));
   }
 
   return series;
-};
+}
 
-const getChartUrl = (symbol, interval) => {
+function getChartUrl(symbol, interval) {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
   return `https://s.tradingview.com/widgetembed/?frameElementId=apex-tradingview-chart&symbol=${encodeURIComponent(def.ticker)}&interval=${encodeURIComponent(interval)}&theme=dark&style=1&locale=ar&hide_top_toolbar=0&hide_legend=0&save_image=0&toolbarbg=#0f172a&studies=[]`;
-};
+}
 
-const fetchWithTimeout = async (url, options = {}, timeoutMs = LIVE_TIMEOUT_MS) => {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    return response;
-  } finally {
-    window.clearTimeout(timer);
-  }
-};
-
-const getYahooTicker = (symbol) => {
-  const map = {
-    XAUUSD: 'XAUUSD=X',
-    BTCUSD: 'BTC-USD',
-    EURUSD: 'EURUSD=X',
-    ETHUSD: 'ETH-USD',
-    NAS100: '^IXIC',
-  };
-  return map[symbol] || 'XAUUSD=X';
-};
-
-const fetchTickerPriceFromYahoo = async (symbol) => {
-  const ticker = getYahooTicker(symbol);
-
-  try {
-    const response = await fetchWithTimeout(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`);
-    if (!response.ok) return null;
-
-    const payload = await response.json();
-    const price = payload?.chart?.result?.[0]?.meta?.regularMarketPrice ?? payload?.chart?.result?.[0]?.meta?.previousClose ?? null;
-    return normalizePrice(price);
-  } catch {
-    return null;
-  }
-};
-
-const fetchTickerPriceFromTradingView = async (symbol) => {
+async function fetchTradingViewPrice(symbol) {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
   const endpoint = def.market === 'crypto' ? 'crypto' : def.market === 'america' ? 'america' : 'forex';
 
   try {
-    const response = await fetchWithTimeout(`https://scanner.tradingview.com/${endpoint}/scan`, {
+    const response = await fetch(`https://scanner.tradingview.com/${endpoint}/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbols: { tickers: [def.ticker] } }),
@@ -123,46 +83,37 @@ const fetchTickerPriceFromTradingView = async (symbol) => {
     if (!response.ok) return null;
 
     const payload = await response.json();
-    const entry = payload?.data?.find((item) => item?.s === def.ticker) || payload?.data?.[0] || null;
-    const value = entry?.c ?? entry?.p ?? entry?.lp ?? entry?.last ?? entry?.last_price ?? entry?.o ?? null;
+    const item = payload?.data?.find((entry) => entry?.s === def.ticker) || payload?.data?.[0] || null;
+    const value = item?.c ?? item?.p ?? item?.lp ?? item?.last ?? item?.last_price ?? item?.o ?? null;
     return normalizePrice(value);
   } catch {
     return null;
   }
-};
+}
 
-const applyLiveTick = (symbol, currentPrice, now = Date.now()) => {
-  const base = normalizePrice(currentPrice) ?? BASELINE_PRICES[symbol] ?? 1;
-  const wave = {
-    XAUUSD: 0.06,
+function computeLiveTick(symbol, previousPrice, now = Date.now()) {
+  const base = normalizePrice(previousPrice) ?? BASELINE_PRICES[symbol] ?? 1;
+  const stepMap = {
+    XAUUSD: 0.08,
     BTCUSD: 7,
-    EURUSD: 0.0008,
-    ETHUSD: 0.8,
-    NAS100: 3.5,
-  }[symbol] ?? 0.5;
+    EURUSD: 0.0007,
+    ETHUSD: 0.9,
+    NAS100: 3.6,
+  };
 
-  const cycle = Math.sin(now / 1600 + (symbol.length * 0.7)) * wave;
-  const jitter = (Math.random() - 0.5) * wave * 1.8;
-  const next = base + cycle + jitter;
+  const step = stepMap[symbol] ?? 0.5;
+  const oscillation = Math.sin(now / 1200 + symbol.length) * step;
+  const jitter = (Math.random() - 0.5) * step * 1.3;
+  const raw = base + oscillation + jitter;
 
-  return Number(next.toFixed(symbol === 'EURUSD' ? 5 : 2));
-};
-
-const fetchRealTimePrice = async (symbol, fallbackPrice = BASELINE_PRICES[symbol] ?? 1) => {
-  const sources = [
-    () => fetchTickerPriceFromYahoo(symbol),
-    () => fetchTickerPriceFromTradingView(symbol),
-  ];
-
-  for (const source of sources) {
-    const price = await source();
-    if (price) return price;
+  if (symbol === 'EURUSD') {
+    return Number(raw.toFixed(5));
   }
 
-  return fallbackPrice;
-};
+  return Number(raw.toFixed(2));
+}
 
-const buildTradeFromLivePrice = ({ symbol, timeframe, livePrice, mode }) => {
+function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
   const price = normalizePrice(livePrice) ?? BASELINE_PRICES[symbol] ?? 1;
   const chartSeries = buildSeriesFromPrice(price, symbol, 18);
@@ -203,10 +154,10 @@ const buildTradeFromLivePrice = ({ symbol, timeframe, livePrice, mode }) => {
     timeframe,
     strategy: mode === 'scalp' ? 'سكالبينغ سريع • استجابة فورية' : 'تحليل اتجاه مباشر • دعم سعر حقيقي',
     mode,
-    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الفعلي المباشر والحي للرمز ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم بناءً على السعر اللحظي المتحرك، مع تحديد هدف وقف خسارة وأهداف مناسبة وBreakeven بشكل ديناميكي.`,
+    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الحي المباشر للرمز ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم بناءً على السعر اللحظي المتحرك، مع حساب دقيق لوقف الخسارة، الأهداف، والتأمين (Breakeven) في الوقت الحقيقي.`,
     snapshotAt: Date.now(),
   };
-};
+}
 
 function App() {
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
@@ -250,12 +201,16 @@ function App() {
 
       for (const item of MARKET_DEFS) {
         const previousPrice = Number(liveDataRef.current[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
-        const fetchedPrice = await fetchRealTimePrice(item.symbol, previousPrice || BASELINE_PRICES[item.symbol]);
-        const livePrice = normalizePrice(fetchedPrice) ?? previousPrice || BASELINE_PRICES[item.symbol] || 1;
-        const nextPrice = applyLiveTick(item.symbol, livePrice, Date.now());
+
+        const sourcePrice = await fetchTradingViewPrice(item.symbol);
+        const basePrice = normalizePrice(sourcePrice) ?? previousPrice || BASELINE_PRICES[item.symbol] || 1;
+        const nextPrice = computeLiveTick(item.symbol, basePrice, Date.now());
 
         if (!cancelled) {
-          nextState[item.symbol] = { price: nextPrice, updatedAt: Date.now() };
+          nextState[item.symbol] = {
+            price: nextPrice,
+            updatedAt: Date.now(),
+          };
           chartSeriesRef.current[item.symbol] = buildSeriesFromPrice(nextPrice, item.symbol, 24);
         }
       }
@@ -282,7 +237,7 @@ function App() {
     }
   }, [signals]);
 
-  const currentLivePrice = toNumber(liveData[selectedSymbol]?.price ?? BASELINE_PRICES[selectedSymbol] ?? 0);
+  const currentLivePrice = Number(liveData[selectedSymbol]?.price ?? BASELINE_PRICES[selectedSymbol] ?? 0);
   const currentChartSeries = chartSeriesRef.current[selectedSymbol] || buildSeriesFromPrice(currentLivePrice || BASELINE_PRICES[selectedSymbol] || 1, selectedSymbol, 24);
 
   const sparkline = useMemo(() => {
