@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
-const LIVE_REFRESH_MS = 3000;
+const LIVE_REFRESH_MS = 1000;
 
 const MARKET_DEFS = [
-  { symbol: 'XAUUSD', label: 'الذهب', ticker: 'OANDA:XAUUSD', market: 'forex', precision: 2, color: '#f6c453' },
-  { symbol: 'BTCUSD', label: 'بيتكوين', ticker: 'BINANCE:BTCUSDT', market: 'crypto', precision: 2, color: '#f7931a' },
-  { symbol: 'EURUSD', label: 'اليورو / الدولار', ticker: 'FX:EURUSD', market: 'forex', precision: 5, color: '#58d68d' },
-  { symbol: 'ETHUSD', label: 'إيثيريوم', ticker: 'BINANCE:ETHUSDT', market: 'crypto', precision: 2, color: '#8a7dff' },
-  { symbol: 'NAS100', label: 'ناسداك 100', ticker: 'NASDAQ:IXIC', market: 'america', precision: 2, color: '#7cc7ff' },
+  { symbol: 'XAUUSD', label: 'الذهب', market: 'gold', precision: 2, color: '#f6c453' },
+  { symbol: 'BTCUSD', label: 'بيتكوين', market: 'crypto', precision: 2, color: '#f7931a' },
+  { symbol: 'EURUSD', label: 'اليورو / الدولار', market: 'forex', precision: 5, color: '#58d68d' },
+  { symbol: 'ETHUSD', label: 'إيثيريوم', market: 'crypto', precision: 2, color: '#8a7dff' },
+  { symbol: 'NAS100', label: 'ناسداك 100', market: 'index', precision: 2, color: '#7cc7ff' },
 ];
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -33,61 +33,130 @@ const average = (values) => {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 };
 
-function buildSeriesFromPrice(price, symbol, length = 18) {
-  const safePrice = normalizePrice(price);
-  if (!safePrice) {
-    return Array.from({ length }, () => 0);
+const createSparklinePoints = (values) => {
+  if (!values.length) return '';
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  return values
+    .map((point, index) => {
+      const x = (index / Math.max(values.length - 1, 1)) * 300;
+      const y = 80 - ((point - min) / range) * 80;
+      return `${x},${y}`;
+    })
+    .join(' ');
+};
+
+async function fetchGoldPrice() {
+  const candidates = [
+    'https://api.gold-api.com/price/XAU',
+    'https://api.metals.live/v1/spot',
+  ];
+
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) continue;
+
+      const payload = await response.json();
+
+      if (typeof payload?.price === 'number') {
+        return payload.price;
+      }
+
+      if (Array.isArray(payload)) {
+        const gold = payload.find((item) => item?.metal === 'gold' || item?.symbol === 'XAUUSD' || item?.code === 'XAU');
+        const value = gold?.price ?? gold?.value ?? gold?.last_price ?? gold?.p ?? null;
+        if (value) return Number(value);
+      }
+
+      if (payload?.rates && payload.rates.XAU) {
+        return Number(payload.rates.XAU);
+      }
+    } catch {
+      // try next candidate 
+    }
   }
 
-  const series = [];
-  let current = safePrice;
-
-  for (let i = 0; i < length; i += 1) {
-    const direction = i % 2 === 0 ? 1 : -1;
-    const driftFactor = (safePrice * 0.00018) * (i * 0.18 + 1);
-    const wave = Math.sin(i * 0.9) * (safePrice * 0.00012);
-    current = current + direction * driftFactor + wave;
-    series.push(Number(current.toFixed(5)));
-  }
-
-  return series;
+  return null;
 }
 
-function getChartUrl(symbol, interval) {
-  const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  return `https://s.tradingview.com/widgetembed/?frameElementId=apex-tradingview-chart&symbol=${encodeURIComponent(def.ticker)}&interval=${encodeURIComponent(interval)}&theme=dark&style=1&locale=ar&hide_top_toolbar=0&hide_legend=0&save_image=0&toolbarbg=#0f172a&studies=[]`;
-}
+async function fetchForexPrice(symbol) {
+  const pairs = {
+    EURUSD: { from: 'EUR', to: 'USD' },
+  };
 
-async function fetchTradingViewPrice(symbol) {
-  const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  const endpoint = def.market === 'crypto' ? 'crypto' : def.market === 'america' ? 'america' : 'forex';
+  const pair = pairs[symbol];
+  if (!pair) return null;
 
   try {
-    const response = await fetch(`https://scanner.tradingview.com/${endpoint}/scan`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await fetch(`https://api.frankfurter.app/latest?from=${pair.from}&to=${pair.to}`, {
       cache: 'no-store',
-      body: JSON.stringify({
-        symbols: { tickers: [def.ticker] },
-      }),
     });
 
     if (!response.ok) return null;
 
     const payload = await response.json();
-    const item = payload?.data?.find((entry) => entry?.s === def.ticker) || payload?.data?.[0] || null;
-    const value = item?.c ?? item?.p ?? item?.lp ?? item?.last ?? item?.last_price ?? item?.o ?? null;
-    return normalizePrice(value);
+    return Number(payload?.rates?.[pair.to]);
   } catch {
     return null;
   }
 }
 
-function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
-  const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  const price = normalizePrice(livePrice) ?? 0;
-  const chartSeries = buildSeriesFromPrice(price, symbol, 18);
-  const middle = average(chartSeries);
+async function fetchCryptoPrice(symbol) {
+  const pair = symbol === 'BTCUSD' ? 'BTCUSDT' : 'ETHUSDT';
+
+  try {
+    const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`, {
+      cache: 'no-store',
+    });
+
+    if (!response.ok) return null;
+
+    const payload = await response.json();
+    return Number(payload?.price);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchNasdaqPrice() {
+  try {
+    const response = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d', {
+      cache: 'no-store',
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) return null;
+
+    const payload = await response.json();
+    const price = payload?.chart?.result?.[0]?.meta?.regularMarketPrice
+      ?? payload?.chart?.result?.[0]?.meta?.previousClose
+      ?? payload?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.at(-1)
+      ?? null;
+
+    return normalizePrice(price);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchMarketPrice(symbol) {
+  if (symbol === 'XAUUSD') return fetchGoldPrice();
+  if (symbol === 'EURUSD') return fetchForexPrice(symbol);
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return fetchCryptoPrice(symbol);
+  if (symbol === 'NAS100') return fetchNasdaqPrice();
+  return null;
+}
+
+function buildTradeFromLivePrice({ symbol, timeframe, series, mode }) {
+  const values = Array.isArray(series) && series.length ? series : [Number(series) || 0];
+  const price = normalizePrice(values.at(-1)) ?? 0;
+  const middle = average(values);
   const direction = price >= middle ? 'BUY' : 'SELL';
 
   const volatilityMap = {
@@ -98,6 +167,7 @@ function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
     NAS100: 20,
   };
 
+  const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
   const baseDistance = volatilityMap[symbol] ?? 2;
   const scaledDistance = mode === 'scalp' ? Math.max(baseDistance * 0.7, def.precision === 5 ? 0.0013 : 1.1) : baseDistance;
   const tpMultiple = mode === 'scalp' ? 1.7 : 2.1;
@@ -124,7 +194,7 @@ function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
     timeframe,
     strategy: mode === 'scalp' ? 'سكالبينغ سريع • استجابة فورية' : 'تحليل اتجاه مباشر • دعم سعر حقيقي',
     mode,
-    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر المباشر من TradingView والمنصة الحية ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم احتسابه من السعر الحقيقي الحالي، مع احتساب مستويات وقف الخسارة والأهداف وفقًا للحركة الفعلية للأسعار.`,
+    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} تم جلبه مباشرة من مصدر السوق الحقيقي دون أي محاكاة أو أرقام ثابتة. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم احتسابه من السعر الحي الحالي، مع حساب مستويات وقف الخسارة والأهداف وفق حركة السوق الفعلية.`,
     snapshotAt: Date.now(),
   };
 }
@@ -133,7 +203,6 @@ function App() {
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
   const [timeframe, setTimeframe] = useState('1m');
   const [activeTab, setActiveTab] = useState('overview');
-  const [chartMode, setChartMode] = useState('tradingview');
   const [loading, setLoading] = useState(true);
   const [loadingAi, setLoadingAi] = useState(false);
   const [analysis, setAnalysis] = useState(null);
@@ -151,13 +220,20 @@ function App() {
   const [liveData, setLiveData] = useState(() => {
     const initial = {};
     MARKET_DEFS.forEach((item) => {
-      initial[item.symbol] = { price: 0, updatedAt: Date.now() };
+      initial[item.symbol] = { price: null, updatedAt: Date.now() };
+    });
+    return initial;
+  });
+
+  const [history, setHistory] = useState(() => {
+    const initial = {};
+    MARKET_DEFS.forEach((item) => {
+      initial[item.symbol] = [];
     });
     return initial;
   });
 
   const liveDataRef = useRef(liveData);
-  const chartSeriesRef = useRef({});
 
   useEffect(() => {
     liveDataRef.current = liveData;
@@ -168,26 +244,29 @@ function App() {
 
     const refresh = async () => {
       const nextState = {};
+      const nextHistory = {};
 
       for (const item of MARKET_DEFS) {
-        const previousPrice = normalizePrice(liveDataRef.current[item.symbol]?.price) ?? 0;
-        const fetchedPrice = await fetchTradingViewPrice(item.symbol);
-        const nextPrice = normalizePrice(fetchedPrice) ?? previousPrice;
+        try {
+          const price = await fetchMarketPrice(item.symbol);
+          const normalized = normalizePrice(price);
 
-        if (!cancelled) {
-          nextState[item.symbol] = {
-            price: nextPrice,
-            updatedAt: Date.now(),
-          };
-          chartSeriesRef.current[item.symbol] = buildSeriesFromPrice(nextPrice, item.symbol, 24);
+          if (!cancelled && normalized) {
+            nextState[item.symbol] = { price: normalized, updatedAt: Date.now() };
+            nextHistory[item.symbol] = [...(history[item.symbol] || []), normalized].slice(-60);
+          }
+        } catch {
+          // do not fabricate value
         }
       }
 
-      if (!cancelled) {
+      if (!cancelled && Object.keys(nextState).length) {
         setLiveData((previous) => ({ ...previous, ...nextState }));
+        setHistory((previous) => ({ ...previous, ...nextHistory }));
         setLastUpdated(Date.now());
-        setLoading(false);
       }
+
+      setLoading(false);
     };
 
     refresh();
@@ -206,29 +285,8 @@ function App() {
   }, [signals]);
 
   const currentLivePrice = normalizePrice(liveData[selectedSymbol]?.price) ?? 0;
-  const currentChartSeries = chartSeriesRef.current[selectedSymbol] || buildSeriesFromPrice(currentLivePrice || 1, selectedSymbol, 24);
-
-  const sparkline = useMemo(() => {
-    const values = currentChartSeries;
-    if (!values.length) return '';
-
-    const max = Math.max(...values);
-    const min = Math.min(...values);
-    const range = max - min || 1;
-    const width = 300;
-    const height = 80;
-
-    return values
-      .map((point, index) => {
-        const x = (index / (values.length - 1)) * width;
-        const y = height - ((point - min) / range) * height;
-        return `${x},${y}`;
-      })
-      .join(' ');
-  }, [currentChartSeries]);
-
-  const tvTicker = (MARKET_DEFS.find((item) => item.symbol === selectedSymbol) || MARKET_DEFS[0]).ticker;
-  const tvUrl = getChartUrl(selectedSymbol, { '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240' }[timeframe] || '1');
+  const currentSeries = history[selectedSymbol] && history[selectedSymbol].length ? history[selectedSymbol] : [currentLivePrice].filter(Boolean);
+  const sparkline = useMemo(() => createSparklinePoints(currentSeries), [currentSeries]);
 
   const persistSignal = (trade) => {
     const record = {
@@ -252,45 +310,26 @@ function App() {
 
   const handleAnalyze = async () => {
     const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
-    const activePrice = currentLivePrice > 0 ? currentLivePrice : 0;
+    const series = history[selectedSymbol] && history[selectedSymbol].length ? history[selectedSymbol] : [currentLivePrice].filter(Boolean);
+    const activePrice = normalizePrice(series.at(-1)) ?? currentLivePrice;
 
     setLoadingAi(true);
 
     try {
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: selectedSymbol,
-          timeframe,
-          mode,
-          price: activePrice,
-          ticker: tvTicker,
-        }),
+      const trade = buildTradeFromLivePrice({
+        symbol: selectedSymbol,
+        timeframe,
+        series,
+        mode,
       });
 
-      if (response.ok) {
-        const payload = await response.json();
-        const trade = payload?.trade || buildTradeFromLivePrice({ symbol: selectedSymbol, timeframe, livePrice: activePrice, mode });
-        setAnalysis(trade);
-        persistSignal(trade);
-        return;
-      }
+      setAnalysis(trade);
+      persistSignal(trade);
     } catch {
-      // fallback below
+      setAnalysis(null);
     } finally {
       setLoadingAi(false);
     }
-
-    const fallbackTrade = buildTradeFromLivePrice({
-      symbol: selectedSymbol,
-      timeframe,
-      livePrice: activePrice || 1,
-      mode,
-    });
-
-    setAnalysis(fallbackTrade);
-    persistSignal(fallbackTrade);
   };
 
   const totalBuys = signals.filter((signal) => signal.direction === 'BUY').length;
@@ -364,15 +403,15 @@ function App() {
                     </div>
                     <div className="value-block">
                       <span>الدخول</span>
-                      <strong>{formatPrice(signal.entry, selectedSymbol)}</strong>
+                      <strong>{formatPrice(signal.entry, signal.symbol)}</strong>
                     </div>
                     <div className="value-block">
                       <span>وقف الخسارة</span>
-                      <strong>{formatPrice(signal.stopLoss, selectedSymbol)}</strong>
+                      <strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong>
                     </div>
                     <div className="value-block">
                       <span>الأهداف</span>
-                      <strong>{formatPrice(signal.tp1, selectedSymbol)} / {formatPrice(signal.tp2, selectedSymbol)}</strong>
+                      <strong>{formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}</strong>
                     </div>
                     <div className="value-block">
                       <span>الثقة</span>
@@ -392,8 +431,8 @@ function App() {
             <section className="market-grid">
               {MARKET_DEFS.map((item) => {
                 const price = normalizePrice(liveData[item.symbol]?.price) ?? 0;
-                const trend = Math.random() * 10 - 5;
-                const change = Number.isFinite(price) && price > 0 ? trend : 0;
+                const previous = history[item.symbol]?.at(-2) ?? price;
+                const trend = previous && previous > 0 ? ((price - previous) / previous) * 100 : 0;
                 const selected = selectedSymbol === item.symbol;
 
                 return (
@@ -407,7 +446,7 @@ function App() {
                     </div>
                     <div className="market-price-row">
                       <strong>{formatPrice(price, item.symbol)}</strong>
-                      <span className={change >= 0 ? 'up' : 'down'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</span>
+                      <span className={trend >= 0 ? 'up' : 'down'}>{trend >= 0 ? '+' : ''}{trend.toFixed(2)}%</span>
                     </div>
                   </button>
                 );
@@ -444,8 +483,7 @@ function App() {
                   <div className="chart-card">
                     <div className="chart-toolbar">
                       <div className="view-toggle">
-                        <button type="button" className={chartMode === 'classic' ? 'active' : ''} onClick={() => setChartMode('classic')}>الشارت العادي</button>
-                        <button type="button" className={chartMode === 'tradingview' ? 'active' : ''} onClick={() => setChartMode('tradingview')}>TradingView</button>
+                        <button type="button" className="active">السعر الحي</button>
                       </div>
                     </div>
 
@@ -464,23 +502,17 @@ function App() {
                       </div>
                     </div>
 
-                    {chartMode === 'tradingview' ? (
-                      <div className="tradingview-box">
-                        <iframe title="TradingView Chart" src={tvUrl} className="tradingview-frame" loading="lazy" allowFullScreen />
-                      </div>
-                    ) : (
-                      <div className="custom-chart-card">
-                        <svg viewBox="0 0 300 80" className="sparkline" preserveAspectRatio="none">
-                          <defs>
-                            <linearGradient id="spark-gradient" x1="0" x2="1">
-                              <stop offset="0%" stopColor="#7bb4ff" />
-                              <stop offset="100%" stopColor="#70f0b7" />
-                            </linearGradient>
-                          </defs>
-                          <polyline fill="none" stroke="url(#spark-gradient)" strokeWidth="3" points={sparkline} />
-                        </svg>
-                      </div>
-                    )}
+                    <div className="custom-chart-card">
+                      <svg viewBox="0 0 300 80" className="sparkline" preserveAspectRatio="none">
+                        <defs>
+                          <linearGradient id="spark-gradient" x1="0" x2="1">
+                            <stop offset="0%" stopColor="#7bb4ff" />
+                            <stop offset="100%" stopColor="#70f0b7" />
+                          </linearGradient>
+                        </defs>
+                        <polyline fill="none" stroke="url(#spark-gradient)" strokeWidth="3" points={sparkline} />
+                      </svg>
+                    </div>
                   </div>
                 </div>
 
