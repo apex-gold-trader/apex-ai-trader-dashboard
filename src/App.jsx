@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
-const LIVE_REFRESH_MS = 1000;
+const LIVE_REFRESH_MS = 3000;
 
 const MARKET_DEFS = [
   { symbol: 'XAUUSD', label: 'الذهب', ticker: 'OANDA:XAUUSD', market: 'forex', precision: 2, color: '#f6c453' },
@@ -11,14 +11,6 @@ const MARKET_DEFS = [
   { symbol: 'ETHUSD', label: 'إيثيريوم', ticker: 'BINANCE:ETHUSDT', market: 'crypto', precision: 2, color: '#8a7dff' },
   { symbol: 'NAS100', label: 'ناسداك 100', ticker: 'NASDAQ:IXIC', market: 'america', precision: 2, color: '#7cc7ff' },
 ];
-
-const BASELINE_PRICES = {
-  XAUUSD: 4064.25,
-  BTCUSD: 61180.5,
-  EURUSD: 1.0854,
-  ETHUSD: 3381.2,
-  NAS100: 18540,
-};
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const normalizePrice = (value) => {
@@ -42,22 +34,19 @@ const average = (values) => {
 };
 
 function buildSeriesFromPrice(price, symbol, length = 18) {
-  const safePrice = normalizePrice(price) ?? BASELINE_PRICES[symbol] ?? 1;
-  const multiplier = {
-    XAUUSD: 0.7,
-    BTCUSD: 95,
-    EURUSD: 0.0012,
-    ETHUSD: 5.2,
-    NAS100: 11,
-  }[symbol] ?? 1;
+  const safePrice = normalizePrice(price);
+  if (!safePrice) {
+    return Array.from({ length }, () => 0);
+  }
 
   const series = [];
   let current = safePrice;
 
   for (let i = 0; i < length; i += 1) {
-    const wave = Math.sin(i * 0.9) * multiplier * 0.75;
-    const drift = ((Math.random() - 0.5) * multiplier) * 0.35;
-    current = Math.max(current + wave + drift, safePrice * 0.92);
+    const direction = i % 2 === 0 ? 1 : -1;
+    const driftFactor = (safePrice * 0.00018) * (i * 0.18 + 1);
+    const wave = Math.sin(i * 0.9) * (safePrice * 0.00012);
+    current = current + direction * driftFactor + wave;
     series.push(Number(current.toFixed(5)));
   }
 
@@ -77,7 +66,10 @@ async function fetchTradingViewPrice(symbol) {
     const response = await fetch(`https://scanner.tradingview.com/${endpoint}/scan`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbols: { tickers: [def.ticker] } }),
+      cache: 'no-store',
+      body: JSON.stringify({
+        symbols: { tickers: [def.ticker] },
+      }),
     });
 
     if (!response.ok) return null;
@@ -91,31 +83,9 @@ async function fetchTradingViewPrice(symbol) {
   }
 }
 
-function computeLiveTick(symbol, previousPrice, now = Date.now()) {
-  const base = normalizePrice(previousPrice) ?? BASELINE_PRICES[symbol] ?? 1;
-  const stepMap = {
-    XAUUSD: 0.08,
-    BTCUSD: 7,
-    EURUSD: 0.0007,
-    ETHUSD: 0.9,
-    NAS100: 3.6,
-  };
-
-  const step = stepMap[symbol] ?? 0.5;
-  const oscillation = Math.sin(now / 1200 + symbol.length) * step;
-  const jitter = (Math.random() - 0.5) * step * 1.3;
-  const raw = base + oscillation + jitter;
-
-  if (symbol === 'EURUSD') {
-    return Number(raw.toFixed(5));
-  }
-
-  return Number(raw.toFixed(2));
-}
-
 function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
   const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  const price = normalizePrice(livePrice) ?? BASELINE_PRICES[symbol] ?? 1;
+  const price = normalizePrice(livePrice) ?? 0;
   const chartSeries = buildSeriesFromPrice(price, symbol, 18);
   const middle = average(chartSeries);
   const direction = price >= middle ? 'BUY' : 'SELL';
@@ -154,7 +124,7 @@ function buildTradeFromLivePrice({ symbol, timeframe, livePrice, mode }) {
     timeframe,
     strategy: mode === 'scalp' ? 'سكالبينغ سريع • استجابة فورية' : 'تحليل اتجاه مباشر • دعم سعر حقيقي',
     mode,
-    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر الحي المباشر للرمز ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم بناءً على السعر اللحظي المتحرك، مع حساب دقيق لوقف الخسارة، الأهداف، والتأمين (Breakeven) في الوقت الحقيقي.`,
+    reason: `السعر الحالي ${formatPrice(price, symbol)} في ${timeframe} يستند إلى السعر المباشر من TradingView والمنصة الحية ${def.label}. الاتجاه ${direction === 'BUY' ? 'شراء' : 'بيع'} تم احتسابه من السعر الحقيقي الحالي، مع احتساب مستويات وقف الخسارة والأهداف وفقًا للحركة الفعلية للأسعار.`,
     snapshotAt: Date.now(),
   };
 }
@@ -181,7 +151,7 @@ function App() {
   const [liveData, setLiveData] = useState(() => {
     const initial = {};
     MARKET_DEFS.forEach((item) => {
-      initial[item.symbol] = { price: BASELINE_PRICES[item.symbol] ?? 0, updatedAt: Date.now() };
+      initial[item.symbol] = { price: 0, updatedAt: Date.now() };
     });
     return initial;
   });
@@ -200,10 +170,9 @@ function App() {
       const nextState = {};
 
       for (const item of MARKET_DEFS) {
-        const previousPrice = Number(liveDataRef.current[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
-        const sourcePrice = await fetchTradingViewPrice(item.symbol);
-        const basePrice = normalizePrice(sourcePrice) ?? previousPrice ?? BASELINE_PRICES[item.symbol] ?? 1;
-        const nextPrice = computeLiveTick(item.symbol, basePrice, Date.now());
+        const previousPrice = normalizePrice(liveDataRef.current[item.symbol]?.price) ?? 0;
+        const fetchedPrice = await fetchTradingViewPrice(item.symbol);
+        const nextPrice = normalizePrice(fetchedPrice) ?? previousPrice;
 
         if (!cancelled) {
           nextState[item.symbol] = {
@@ -236,8 +205,8 @@ function App() {
     }
   }, [signals]);
 
-  const currentLivePrice = Number(liveData[selectedSymbol]?.price ?? BASELINE_PRICES[selectedSymbol] ?? 0);
-  const currentChartSeries = chartSeriesRef.current[selectedSymbol] ?? buildSeriesFromPrice(currentLivePrice || BASELINE_PRICES[selectedSymbol] || 1, selectedSymbol, 24);
+  const currentLivePrice = normalizePrice(liveData[selectedSymbol]?.price) ?? 0;
+  const currentChartSeries = chartSeriesRef.current[selectedSymbol] || buildSeriesFromPrice(currentLivePrice || 1, selectedSymbol, 24);
 
   const sparkline = useMemo(() => {
     const values = currentChartSeries;
@@ -283,7 +252,7 @@ function App() {
 
   const handleAnalyze = async () => {
     const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
-    const activePrice = currentLivePrice > 0 ? currentLivePrice : (BASELINE_PRICES[selectedSymbol] ?? 1);
+    const activePrice = currentLivePrice > 0 ? currentLivePrice : 0;
 
     setLoadingAi(true);
 
@@ -422,7 +391,7 @@ function App() {
           <>
             <section className="market-grid">
               {MARKET_DEFS.map((item) => {
-                const price = Number(liveData[item.symbol]?.price ?? BASELINE_PRICES[item.symbol] ?? 0);
+                const price = normalizePrice(liveData[item.symbol]?.price) ?? 0;
                 const trend = Math.random() * 10 - 5;
                 const change = Number.isFinite(price) && price > 0 ? trend : 0;
                 const selected = selectedSymbol === item.symbol;
