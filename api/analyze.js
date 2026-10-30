@@ -16,7 +16,7 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    const apiKey = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6L8cpGu6IIBo3MtbBfkfpQXFRHSeeBeKGmg_kXcui1M9g';
+    const apiKey = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6LFwqmxfTfLs3lyDJd3_NU5IMw1FdJx93GEszMi69uUaQ';
 
     const prompt = `
       أنت محلل فني احترافي للأسواق المالية.
