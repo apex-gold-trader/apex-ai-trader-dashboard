@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
@@ -279,8 +279,8 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
   const confidence = clamp(Math.round(70 + (Math.abs(rsi - 50) * 0.7) + (direction === 'BUY' ? 8 : -8)), 68, 96);
 
   const reasons = {
-    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}), ما يعزز شراء الأصول مع إدارة مخاطر دقيقة.`,
-    SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}), ما يدعم البيع مع تحكم في وقف الخسارة.`,
+    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}). السعر الحالي تم جلبه مباشرة من السوق الحقيقي، ويستهدف التداول شراءً عند دعم مناورات الزخم مع إدراج وقف خسارة محكم في منطقة الإيقاف الآمن.`,
+    SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}). السعر الحالي تم جلبه مباشرة من السوق الحقيقي، ويفرض هذا السيناريو دخولاً للبيع مع توقف خسارة آمن بعيداً عن مناطق التلاعب وسلوك التجميع القريب.`,
   };
 
   return {
@@ -303,7 +303,6 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
 }
 
 function App() {
-  const tvRef = useRef(null);
   const [timeframe, setTimeframe] = useState('1m');
   const [marketData, setMarketData] = useState(generateMarketData());
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
@@ -349,65 +348,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return undefined;
-    const scriptId = 'tv-widget-script';
-
-    const loadScript = () => {
-      const existingScript = document.getElementById(scriptId);
-      if (existingScript) return;
-
-      const script = document.createElement('script');
-      script.id = scriptId;
-      script.src = 'https://s.tradingview.com/tv.js';
-      script.async = true;
-      script.onload = () => {
-        if (!window.TradingView || !tvRef.current) return;
-
-        if (tvRef.current._widget) {
-          try {
-            tvRef.current._widget.remove();
-          } catch {
-            // no-op
-          }
-        }
-
-        const widget = new window.TradingView.widget({
-          autosize: true,
-          symbol: symbolMap[selectedSymbol]?.ticker || 'OANDA:XAUUSD',
-          interval: timeframe,
-          timezone: 'Etc/UTC',
-          theme: 'dark',
-          style: '1',
-          locale: 'en',
-          container_id: tvRef.current.id,
-          hide_side_toolbar: false,
-          withdateranges: true,
-          save_image: true,
-          allow_symbol_change: true,
-          studies: ['MASimple@tv-basicstudies'],
-          enabled_features: ['study_templates'],
-          disabled_features: ['header_symbol_search', 'header_compare', 'use_localstorage_for_settings'],
-        });
-
-        tvRef.current._widget = widget;
-      };
-      document.body.appendChild(script);
-    };
-
-    loadScript();
-
-    return () => {
-      if (tvRef.current?._widget) {
-        try {
-          tvRef.current._widget.remove();
-        } catch {
-          // no-op
-        }
-      }
-    };
-  }, [selectedSymbol, timeframe]);
-
-  useEffect(() => {
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(signals));
     }
@@ -448,7 +388,7 @@ function App() {
   };
 
   const handleAnalyze = async () => {
-    const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
+    const mode = activeTab === 'scalp' ? 'scalp' : 'scalp';
     const current = marketData[selectedSymbol];
 
     setLoadingAi(true);
@@ -466,23 +406,23 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error('Unexpected response from AI API');
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || 'فشل الاتصال بخادم التحليل.');
       }
 
       const data = await response.json();
       const trade = data.trade || analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
 
-      if (!trade) return;
+      if (!trade) {
+        throw new Error('لا يوجد تحليل صالح للعرض في الوقت الحالي.');
+      }
 
       setAnalysis(trade);
       persistSignal(trade);
       setActiveTab('signals');
-    } catch {
-      const fallback = analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
-      if (fallback) {
-        setAnalysis(fallback);
-        persistSignal(fallback);
-      }
+    } catch (error) {
+      setAnalysis(null);
+      console.error(error);
     } finally {
       setLoadingAi(false);
     }
@@ -528,7 +468,7 @@ function App() {
           className={activeTab === 'signals' ? 'nav-tab active' : 'nav-tab'}
           onClick={() => setActiveTab('signals')}
         >
-          سجل الإشارات والأداء (Signals & Analytics)
+          سجل الإشارات والأداء
         </button>
       </nav>
 
@@ -648,40 +588,30 @@ function App() {
             </section>
 
             <section className="main-panel">
-              <div className="chart-panel">
-                <div className="panel-header">
-                  <div>
-                    <p className="eyebrow">أداة الرسم</p>
-                    <h3>{marketMeta[selectedSymbol]?.label}</h3>
-                  </div>
-                  <div className="timeframe-group">
-                    {TIMEFRAMES.map((option) => (
-                      <button
-                        key={option}
-                        type="button"
-                        className={timeframe === option ? 'tf-btn active' : 'tf-btn'}
-                        onClick={() => handleTimeframeChange(option)}
-                      >
-                        {option}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div ref={tvRef} id="tv-chart" style={{ minHeight: '420px', width: '100%' }} />
-              </div>
-
-              <aside className="analysis-panel">
+              <aside className="analysis-panel" style={{ width: '100%' }}>
                 <div className="analysis-box">
-                  <div className="panel-header compact">
+                  <div className="panel-header compact" style={{ alignItems: 'center' }}>
                     <div>
                       <p className="eyebrow">التحليل</p>
-                      <h3>تنفيذ الذكاء الاصطناعي</h3>
+                      <h3>{marketMeta[selectedSymbol]?.label}</h3>
                     </div>
-                    <button type="button" className="analyze-btn" onClick={handleAnalyze} disabled={loadingAi}>
-                      {loadingAi ? 'جارٍ التحليل...' : 'تحليل AI'}
-                    </button>
+                    <div className="timeframe-group">
+                      {TIMEFRAMES.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          className={timeframe === option ? 'tf-btn active' : 'tf-btn'}
+                          onClick={() => handleTimeframeChange(option)}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+
+                  <button type="button" className="analyze-btn" onClick={handleAnalyze} disabled={loadingAi} style={{ width: '100%', margin: '16px 0' }}>
+                    {loadingAi ? 'جارٍ التحليل...' : 'حلل الآن (سكالبينغ)'}
+                  </button>
 
                   {analysis ? (
                     <div className="trade-card">
@@ -706,7 +636,7 @@ function App() {
                     </div>
                   ) : (
                     <div className="empty-card">
-                      <p>اختر زوج التداول ثم اضغط على زر التحليل للحصول على إشارة جاهزة.</p>
+                      <p>اختر زوج التداول ثم اضغط على زر "حلل الآن (سكالبينغ)" للحصول على إشارة جاهزة.</p>
                     </div>
                   )}
                 </div>
