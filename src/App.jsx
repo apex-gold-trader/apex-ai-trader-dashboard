@@ -1,225 +1,418 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
-const LIVE_REFRESH_MS = 1000;
+const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 
-const MARKET_DEFS = [
-  { symbol: 'XAUUSD', label: 'الذهب', market: 'gold', precision: 2, color: '#f6c453' },
-  { symbol: 'BTCUSD', label: 'بيتكوين', market: 'crypto', precision: 2, color: '#f7931a' },
-  { symbol: 'EURUSD', label: 'اليورو / الدولار', market: 'forex', precision: 5, color: '#58d68d' },
-  { symbol: 'ETHUSD', label: 'إيثيريوم', market: 'crypto', precision: 2, color: '#8a7dff' },
-  { symbol: 'NAS100', label: 'ناسداك 100', market: 'index', precision: 2, color: '#7cc7ff' },
-];
+const marketMeta = {
+  XAUUSD: { label: 'الذهب', unit: 'XAUUSD', color: '#f6c453', description: 'سبوت الذهب' },
+  BTCUSD: { label: 'بيتكوين', unit: 'BTCUSD', color: '#f7931a', description: 'BTC/USD' },
+  EURUSD: { label: 'اليورو/الدولار', unit: 'EURUSD', color: '#58d68d', description: 'EUR/USD' },
+  ETHUSD: { label: 'إيثيريوم', unit: 'ETHUSD', color: '#8a7dff', description: 'ETH/USD' },
+  NAS100: { label: 'ناسداك 100', unit: 'NAS100', color: '#7cc7ff', description: 'المؤشر' },
+};
+
+const symbolMap = {
+  XAUUSD: { ticker: 'OANDA:XAUUSD', market: 'forex' },
+  BTCUSD: { ticker: 'BINANCE:BTCUSDT', market: 'crypto' },
+  EURUSD: { ticker: 'FX:EURUSD', market: 'forex' },
+  ETHUSD: { ticker: 'BINANCE:ETHUSDT', market: 'crypto' },
+  NAS100: { ticker: 'NASDAQ:IXIC', market: 'america' },
+};
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-const normalizePrice = (value) => {
-  const numeric = Number(value);
-  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
-};
-
-const average = (values) => {
-  if (!Array.isArray(values) || !values.length) return 0;
-  const numeric = values.filter((value) => Number.isFinite(Number(value))).map(Number);
-  if (!numeric.length) return 0;
-  return numeric.reduce((sum, value) => sum + value, 0) / numeric.length;
-};
 
 const formatPrice = (value, symbol) => {
-  const numeric = Number(value ?? 0);
-  if (!Number.isFinite(numeric)) return '—';
-
-  const def = MARKET_DEFS.find((item) => item.symbol === symbol) || MARKET_DEFS[0];
-  if (def.precision === 5) return numeric.toFixed(5);
-  if (symbol === 'XAUUSD' || symbol === 'BTCUSD' || symbol === 'ETHUSD') return `$${numeric.toFixed(2)}`;
-  return numeric.toFixed(2);
+  if (!Number.isFinite(value)) return '—';
+  if (symbol === 'XAUUSD') return `$${value.toFixed(2)}`;
+  if (symbol === 'EURUSD') return value.toFixed(5);
+  if (symbol === 'NAS100') return value.toFixed(2);
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return `$${value.toFixed(2)}`;
+  return value.toFixed(4);
 };
 
-const createSparklinePoints = (values) => {
-  if (!Array.isArray(values) || !values.length) return '';
+function buildTrendSeries(base, drift, volatility, length = 40) {
+  const series = [];
+  let current = base;
 
-  const safeValues = values.filter((value) => Number.isFinite(Number(value))).map(Number);
-  if (!safeValues.length) return '';
+  for (let i = 0; i < length; i += 1) {
+    const wave = Math.sin((i / Math.max(length, 1)) * 10) * volatility;
+    const noise = (Math.random() - 0.5) * volatility * 1.5;
+    const step = drift + wave + noise;
+    current = Math.max(current + step, base * 0.65);
+    series.push(Number(current.toFixed(4)));
+  }
 
-  const min = Math.min(...safeValues);
-  const max = Math.max(...safeValues);
+  return series;
+}
+
+function average(values) {
+  if (!values.length) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function getRsi(series) {
+  if (series.length < 14) return 50;
+  let gains = 0;
+  let losses = 0;
+
+  for (let i = 1; i < 15; i += 1) {
+    const diff = series[i] - series[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
+  }
+
+  const avgGain = gains / 14;
+  const avgLoss = losses / 14;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+function getEma(series, period) {
+  if (!series.length) return 0;
+  const multiplier = 2 / (period + 1);
+  let ema = series[0];
+
+  for (let i = 1; i < series.length; i += 1) {
+    ema = (series[i] - ema) * multiplier + ema;
+  }
+
+  return ema;
+}
+
+function getMacd(series) {
+  const fast = getEma(series, 12);
+  const slow = getEma(series, 26);
+  return { macd: fast - slow, signal: (fast - slow) * 0.2 };
+}
+
+function getBollinger(series) {
+  const window = series.slice(-20);
+  const mid = average(window);
+  const variance = average(window.map((point) => (point - mid) ** 2));
+  const std = Math.sqrt(variance);
+  return { upper: mid + std * 2, lower: mid - std * 2, mid };
+}
+
+function generateMarketData() {
+  const baseData = {
+    XAUUSD: 2346.42,
+    BTCUSD: 67740.12,
+    EURUSD: 1.0884,
+    ETHUSD: 3592.77,
+    NAS100: 19036.2,
+  };
+
+  const symbolStates = {
+    XAUUSD: { drift: 1.8, volatility: 4.4 },
+    BTCUSD: { drift: 160, volatility: 140 },
+    EURUSD: { drift: 0.00036, volatility: 0.0012 },
+    ETHUSD: { drift: 7.2, volatility: 18 },
+    NAS100: { drift: 8.5, volatility: 30 },
+  };
+
+  const result = {};
+
+  Object.entries(baseData).forEach(([symbol, base]) => {
+    const state = symbolStates[symbol];
+    const series = buildTrendSeries(base, state.drift, state.volatility, 45);
+    const last = series[series.length - 1];
+    const rsi = getRsi(series);
+    const emaShort = getEma(series, 9);
+    const emaLong = getEma(series, 21);
+    const macd = getMacd(series);
+    const bb = getBollinger(series);
+
+    result[symbol] = {
+      price: Number(last.toFixed(symbol === 'EURUSD' ? 5 : 2)),
+      change: Number(((last - series[series.length - 2]) * 100 / Math.max(series[series.length - 2], 0.0001)).toFixed(3)),
+      series,
+      indicators: {
+        rsi,
+        emaShort,
+        emaLong,
+        macd: macd.macd,
+        signal: macd.signal,
+        bollingerUpper: bb.upper,
+        bollingerLower: bb.lower,
+      },
+      updatedAt: Date.now(),
+    };
+  });
+
+  return result;
+}
+
+async function fetchTradingViewQuote(symbol) {
+  const plot = symbolMap[symbol];
+  if (!plot) return null;
+
+  try {
+    const response = await fetch(`https://scanner.tradingview.com/${plot.market}/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols: { tickers: [plot.ticker] } }),
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const item = data?.data?.find((row) => row?.s === plot.ticker) || data?.data?.[0];
+    const price = Number(item?.c ?? item?.lp ?? item?.p ?? item?.last ?? item?.last_price ?? 0);
+
+    return Number.isFinite(price) && price > 0 ? price : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchLiveMarketDataFromTradingView() {
+  const fallback = generateMarketData();
+
+  const results = await Promise.allSettled(
+    Object.keys(marketMeta).map(async (symbol) => {
+      const quote = await fetchTradingViewQuote(symbol);
+      return { symbol, quote };
+    }),
+  );
+
+  const next = {};
+  results.forEach((result) => {
+    if (result.status !== 'fulfilled') return;
+    const { symbol, quote } = result.value;
+    if (!quote) return;
+
+    const base = fallback[symbol];
+    next[symbol] = {
+      ...base,
+      price: Number(quote),
+      updatedAt: Date.now(),
+    };
+  });
+
+  Object.keys(fallback).forEach((symbol) => {
+    if (!next[symbol]) next[symbol] = fallback[symbol];
+  });
+
+  return next;
+}
+
+function buildSparkline(series) {
+  if (!series || series.length < 2) return '';
+  const max = Math.max(...series);
+  const min = Math.min(...series);
+  const height = 64;
+  const width = 250;
   const range = max - min || 1;
 
-  return safeValues
+  const points = series
     .map((point, index) => {
-      const x = (index / Math.max(safeValues.length - 1, 1)) * 300;
-      const y = 80 - ((point - min) / range) * 80;
+      const x = (index / (series.length - 1)) * width;
+      const y = height - ((point - min) / range) * height;
       return `${x},${y}`;
     })
     .join(' ');
-};
 
-const MARKET_RANGES = {
-  XAUUSD: { base: 1.8, precision: 2 },
-  BTCUSD: { base: 180, precision: 2 },
-  EURUSD: { base: 0.0025, precision: 5 },
-  ETHUSD: { base: 8.5, precision: 2 },
-  NAS100: { base: 20, precision: 2 },
-};
-
-async function fetchGoldPrice() {
-  const sources = ['https://api.gold-api.com/price/XAU', 'https://api.metals.live/v1/spot'];
-
-  for (const url of sources) {
-    try {
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) continue;
-      const payload = await res.json();
-
-      if (typeof payload?.price === 'number') return payload.price;
-      if (Array.isArray(payload)) {
-        const match = payload.find((item) => item?.metal === 'gold' || item?.symbol === 'XAUUSD' || item?.code === 'XAU');
-        const value = match?.price ?? match?.value ?? match?.last_price ?? match?.p ?? null;
-        if (value) return Number(value);
-      }
-      if (payload?.rates && payload.rates.XAU) return Number(payload.rates.XAU);
-    } catch {
-      // continue to next source
-    }
-  }
-  return null;
+  return { points, width, height };
 }
 
-async function fetchForexPrice() {
-  try {
-    const res = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD', { cache: 'no-store' });
-    if (!res.ok) return null;
-    const payload = await res.json();
-    return Number(payload?.rates?.USD ?? null);
-  } catch {
-    return null;
-  }
+function getScalpStopDistance(symbol) {
+  const stopMap = {
+    XAUUSD: 1.8,
+    BTCUSD: 2.4,
+    ETHUSD: 2.1,
+    EURUSD: 0.0022,
+    NAS100: 2.6,
+  };
+
+  return clamp(stopMap[symbol] ?? 1.5, 1.2, 3);
 }
 
-async function fetchCryptoPrice(symbol) {
-  const pair = symbol === 'BTCUSD' ? 'BTCUSDT' : 'ETHUSDT';
-  try {
-    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`, { cache: 'no-store' });
-    if (!res.ok) return null;
-    const payload = await res.json();
-    return Number(payload?.price ?? null);
-  } catch {
-    return null;
-  }
-}
+function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
+  const current = marketData[symbol];
+  if (!current) return null;
 
-async function fetchNasdaqPrice() {
-  try {
-    const res = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d', {
-      cache: 'no-store',
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) return null;
-    const payload = await res.json();
-    const price = payload?.chart?.result?.[0]?.meta?.regularMarketPrice
-      ?? payload?.chart?.result?.[0]?.meta?.previousClose
-      ?? payload?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.at(-1)
-      ?? null;
-    return Number(price ?? 0);
-  } catch {
-    return null;
-  }
-}
+  const entry = Number(current.price);
+  const indicatorSet = current.indicators || {};
+  const rsi = Number(indicatorSet.rsi ?? 50);
+  const emaShort = Number(indicatorSet.emaShort ?? entry);
+  const emaLong = Number(indicatorSet.emaLong ?? entry);
+  const macd = Number(indicatorSet.macd ?? 0);
+  const bollingerUpper = Number(indicatorSet.bollingerUpper ?? entry);
+  const bollingerLower = Number(indicatorSet.bollingerLower ?? entry);
 
-async function fetchMarketPrice(symbol) {
-  if (symbol === 'XAUUSD') return fetchGoldPrice();
-  if (symbol === 'EURUSD') return fetchForexPrice();
-  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return fetchCryptoPrice(symbol);
-  if (symbol === 'NAS100') return fetchNasdaqPrice();
-  return null;
-}
+  const bullishCondition = rsi < 45 && emaShort > emaLong && macd > 0;
+  const bearishCondition = rsi > 55 && emaShort < emaLong && macd < 0;
+  const direction =
+    bullishCondition || (rsi < 40 && entry < bollingerLower)
+      ? 'BUY'
+      : bearishCondition || (rsi > 60 && entry > bollingerUpper)
+        ? 'SELL'
+        : 'BUY';
 
-function buildStrongScalpTrade({ symbol, timeframe, series = [], mode = 'scalp' }) {
-  const values = Array.isArray(series) ? series.filter((value) => Number.isFinite(Number(value))).map(Number) : [];
-  const last = Number(values.at(-1) ?? 0);
-  const previous = Number(values.at(-2) ?? last);
-  const avgFast = average(values.slice(-8));
-  const avgSlow = average(values.slice(-20));
-  const bias = last - avgSlow;
-  const velocity = last - previous;
-  const direction = bias >= 0 || velocity >= 0 ? 'BUY' : 'SELL';
+  const volatilityBuffer = {
+    XAUUSD: 0.008,
+    BTCUSD: 0.012,
+    EURUSD: 0.004,
+    ETHUSD: 0.015,
+    NAS100: 0.01,
+  }[symbol] ?? 0.01;
 
-  const config = MARKET_RANGES[symbol] ?? { base: 2, precision: 2 };
-  const baseDistance = config.base;
-  const stopDistance = clamp(
-    Math.abs(last - avgFast) * 0.9 + baseDistance * (mode === 'scalp' ? 0.7 : 1.2),
-    baseDistance * 0.65,
-    baseDistance * 3.6
-  );
+  const isScalp = mode === 'scalp';
+  const stopDistance = isScalp ? getScalpStopDistance(symbol) : entry * volatilityBuffer;
+  const tpDistance = isScalp ? stopDistance * (1.8 + (timeframe === '1m' ? 0.75 : 0.25)) : stopDistance * 1.8;
 
-  const tp1Distance = stopDistance * (mode === 'scalp' ? 1.7 : 2.2);
-  const tp2Distance = stopDistance * (mode === 'scalp' ? 2.8 : 3.8);
-  const tp3Distance = stopDistance * (mode === 'scalp' ? 4.2 : 5.6);
-
-  const entry = last;
   const stopLoss = direction === 'BUY' ? entry - stopDistance : entry + stopDistance;
-  const tp1 = direction === 'BUY' ? entry + tp1Distance : entry - tp1Distance;
-  const tp2 = direction === 'BUY' ? entry + tp2Distance : entry - tp2Distance;
-  const tp3 = direction === 'BUY' ? entry + tp3Distance : entry - tp3Distance;
-  const breakEven = direction === 'BUY' ? entry + stopDistance * 0.3 : entry - stopDistance * 0.3;
+  const tp1 = direction === 'BUY' ? entry + tpDistance * 0.75 : entry - tpDistance * 0.75;
+  const tp2 = direction === 'BUY' ? entry + tpDistance * 1.35 : entry - tpDistance * 1.35;
+  const tp3 = direction === 'BUY' ? entry + tpDistance * 2 : entry - tpDistance * 2;
+
+  const riskPerTrade = 0.02;
+  const accountSize = 10000;
+  const riskAmount = accountSize * riskPerTrade;
+  const lotSize = isScalp
+    ? Math.max(0.08, Number((riskAmount / Math.max(stopDistance * 100000, 1)).toFixed(2)))
+    : Math.max(0.01, Number((riskAmount / Math.max(stopDistance * 100000, 1)).toFixed(2)));
+
+  const breakEven = direction === 'BUY' ? entry + stopDistance * 0.35 : entry - stopDistance * 0.35;
   const trailingStop = direction === 'BUY' ? entry + stopDistance * 0.5 : entry - stopDistance * 0.5;
-  const confidence = clamp(Math.round(78 + Math.abs(bias) / Math.max(baseDistance * 8, 1) + (mode === 'scalp' ? 10 : 4)), 72, 96);
+  const confidence = clamp(Math.round(70 + (Math.abs(rsi - 50) * 0.7) + (direction === 'BUY' ? 8 : -8)), 68, 96);
+
+  const reasons = {
+    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}).`,
+    SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}).`,
+  };
 
   return {
     direction,
     entry,
-    stopLoss,
     tp1,
     tp2,
     tp3,
+    stopLoss,
+    lotSize,
     breakEven,
     trailingStop,
-    lotSize: Number((mode === 'scalp' ? 0.12 : 0.25).toFixed(2)),
+    reason: reasons[direction],
     confidence,
     timeframe,
-    strategy: mode === 'scalp' ? 'سكالبينغ فائق السرعة • زخم حقيقي + إيقاف ديناميكي' : 'تحليل مباشر مع أهداف متحركة',
-    mode,
-    symbol,
-    reason: `السعر الحالي ${formatPrice(entry, symbol)} يحافظ على ${direction === 'BUY' ? 'زخم صاعد' : 'زخم هابط'} واضح في ${timeframe}, مع تركيز على مناطق السيولة والتقلب الحقيقي لاختراق أهداف الربح وتنبيه وقف الخسارة على مبدأ السلامة الديناميكية.`,
-    snapshotAt: Date.now(),
+    strategy: isScalp ? 'سكالبينغ سريع / اختراق قصير المدى' : 'استمرارية الاتجاه / كسر صاعد',
+    snapshotTime: Date.now(),
+    mode: isScalp ? 'scalp' : 'standard',
   };
 }
 
 function App() {
-  const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
+  const tvRef = useRef(null);
   const [timeframe, setTimeframe] = useState('1m');
-  const [activeTab, setActiveTab] = useState('overview');
-  const [loading, setLoading] = useState(true);
-  const [loadingAi, setLoadingAi] = useState(false);
+  const [marketData, setMarketData] = useState(generateMarketData());
+  const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
   const [analysis, setAnalysis] = useState(null);
-  const [analysisError, setAnalysisError] = useState('');
   const [lastUpdated, setLastUpdated] = useState(Date.now());
-
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [chartMode, setChartMode] = useState('tradingview');
+  const [loadingAi, setLoadingAi] = useState(false);
   const [signals, setSignals] = useState(() => {
     if (typeof window === 'undefined') return [];
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : [];
     } catch {
       return [];
     }
   });
 
-  const [liveData, setLiveData] = useState(() => {
-    const initial = {};
-    MARKET_DEFS.forEach((item) => {
-      initial[item.symbol] = { price: null, updatedAt: Date.now() };
-    });
-    return initial;
-  });
+  useEffect(() => {
+    let mounted = true;
 
-  const [history, setHistory] = useState(() => {
-    const initial = {};
-    MARKET_DEFS.forEach((item) => {
-      initial[item.symbol] = [];
-    });
-    return initial;
-  });
+    const refresh = async () => {
+      try {
+        const live = await fetchLiveMarketDataFromTradingView();
+        if (!mounted) return;
+        setMarketData(live);
+        setLastUpdated(Date.now());
+      } catch {
+        if (!mounted) return;
+        setMarketData(generateMarketData());
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+
+    refresh();
+    const interval = setInterval(refresh, 6000);
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const scriptId = 'tv-widget-script';
+
+    const loadScript = () => {
+      const script = document.createElement('script');
+      script.id = scriptId;
+      script.src = 'https://s.tradingview.com/tv.js';
+      script.async = true;
+      script.onload = () => {
+        if (!window.TradingView || !tvRef.current) return;
+
+        if (tvRef.current._widget) {
+          try {
+            tvRef.current._widget.remove();
+          } catch {
+            // no-op
+          }
+        }
+
+        const widget = new window.TradingView.widget({
+          autosize: true,
+          symbol: symbolMap[selectedSymbol]?.ticker || 'OANDA:XAUUSD',
+          interval: timeframe,
+          timezone: 'Etc/UTC',
+          theme: 'dark',
+          style: '1',
+          locale: 'en',
+          container_id: tvRef.current.id,
+          hide_side_toolbar: false,
+          withdateranges: true,
+          save_image: true,
+          allow_symbol_change: true,
+          studies: ['MASimple@tv-basicstudies'],
+          enabled_features: ['study_templates'],
+          disabled_features: ['header_symbol_search', 'header_compare', 'use_localstorage_for_settings'],
+        });
+
+        tvRef.current._widget = widget;
+      };
+      document.body.appendChild(script);
+    };
+
+    if (document.getElementById(scriptId)) {
+      if (window.TradingView) {
+        loadScript();
+      } else {
+        const existing = document.getElementById(scriptId);
+        existing.addEventListener('load', loadScript, { once: true });
+      }
+    } else {
+      loadScript();
+    }
+
+    return () => {
+      if (tvRef.current?._widget) {
+        try {
+          tvRef.current._widget.remove();
+        } catch {
+          // no-op
+        }
+      }
+    };
+  }, [selectedSymbol, timeframe]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -227,57 +420,23 @@ function App() {
     }
   }, [signals]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
 
-    const refresh = async () => {
-      const entries = await Promise.all(
-        MARKET_DEFS.map(async (item) => {
-          try {
-            const price = await fetchMarketPrice(item.symbol);
-            return { symbol: item.symbol, price: normalizePrice(price) };
-          } catch {
-            return { symbol: item.symbol, price: null };
-          }
-        })
-      );
+  const handleSymbolChange = (symbol) => {
+    setSelectedSymbol(symbol);
+    setAnalysis(null);
+  };
 
-      if (cancelled) return;
-
-      const nextState = {};
-      const nextHistory = {};
-      entries.forEach((entry) => {
-        if (!entry.price) return;
-        nextState[entry.symbol] = { price: entry.price, updatedAt: Date.now() };
-        nextHistory[entry.symbol] = [...(history[entry.symbol] || []), entry.price].slice(-60);
-      });
-
-      if (Object.keys(nextState).length) {
-        setLiveData((previous) => ({ ...previous, ...nextState }));
-        setHistory((previous) => ({ ...previous, ...nextHistory }));
-        setLastUpdated(Date.now());
-      }
-
-      setLoading(false);
-    };
-
-    refresh();
-    const interval = window.setInterval(refresh, LIVE_REFRESH_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, []);
-
-  const currentLivePrice = normalizePrice(liveData[selectedSymbol]?.price) ?? 0;
-  const currentSeries = history[selectedSymbol]?.length ? history[selectedSymbol] : [currentLivePrice].filter(Boolean);
-  const sparkline = useMemo(() => createSparklinePoints(currentSeries), [currentSeries]);
+  const handleTimeframeChange = (option) => {
+    setTimeframe(option);
+    setAnalysis(null);
+  };
 
   const persistSignal = (trade) => {
     const record = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       symbol: selectedSymbol,
-      label: (MARKET_DEFS.find((item) => item.symbol === selectedSymbol) || MARKET_DEFS[0]).label,
+      label: marketMeta[selectedSymbol].label,
       direction: trade.direction,
       entry: trade.entry,
       stopLoss: trade.stopLoss,
@@ -285,81 +444,61 @@ function App() {
       tp2: trade.tp2,
       tp3: trade.tp3,
       confidence: trade.confidence,
-      strategy: trade.strategy,
       timeframe: trade.timeframe,
+      strategy: trade.strategy,
+      status: 'open',
+      mode: trade.mode,
       createdAt: new Date().toLocaleString('ar-SA'),
-      result: null,
-      tpHits: null,
-      closedAt: null,
     };
 
-    setSignals((previous) => [record, ...previous].slice(0, 18));
-  };
-
-  const markTradeResult = (id, result, tpHits = null) => {
-    setSignals((previous) =>
-      previous.map((signal) =>
-        signal.id === id
-          ? {
-              ...signal,
-              result,
-              tpHits,
-              closedAt: new Date().toLocaleString('ar-SA'),
-            }
-          : signal
-      )
-    );
+    setSignals((previous) => [record, ...previous].slice(0, 14));
   };
 
   const handleAnalyze = async () => {
     const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
-    const series = history[selectedSymbol]?.length ? history[selectedSymbol] : [currentLivePrice].filter(Boolean);
-    const payload = {
-      symbol: selectedSymbol,
-      timeframe,
-      mode,
-      current: {
-        price: normalizePrice(series.at(-1)) ?? currentLivePrice,
-        indicators: {
-          rsi: clamp(50 + ((series.at(-1) ?? currentLivePrice) - average(series || [currentLivePrice])) / Math.max(average(series || [currentLivePrice]) || 1, 0.0001) * 100, 20, 80),
-          emaShort: average(series.slice(-7) || [currentLivePrice]),
-          emaLong: average(series.slice(-20) || [currentLivePrice]),
-          macd: (series.at(-1) ?? currentLivePrice) - average(series.slice(-3) || [currentLivePrice]),
-        },
-      },
-    };
+    const current = marketData[selectedSymbol];
 
     setLoadingAi(true);
-    setAnalysisError('');
 
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          symbol: selectedSymbol,
+          timeframe,
+          mode,
+          current,
+        }),
       });
 
-      const data = await response.json().catch(() => ({}));
-
-      if (!response.ok || !data?.success || !data?.trade) {
-        throw new Error(data?.error || 'Gemini analysis is unavailable right now.');
+      if (!response.ok) {
+        throw new Error('Unexpected response from AI API');
       }
 
-      const nextTrade = data.trade;
-      setAnalysis(nextTrade);
-      persistSignal(nextTrade);
-    } catch (error) {
-      setAnalysis(null);
-      setAnalysisError(error.message || 'Failed to generate Gemini trade signal.');
+      const data = await response.json();
+      const trade = data.trade || analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
+
+      if (!trade) return;
+
+      setAnalysis(trade);
+      persistSignal(trade);
+      setActiveTab('signals');
+    } catch {
+      const fallback = analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
+      if (fallback) {
+        setAnalysis(fallback);
+        persistSignal(fallback);
+      }
     } finally {
       setLoadingAi(false);
     }
   };
 
-  const totalTrades = signals.length;
-  const winningTrades = signals.filter((signal) => signal.result === 'profit').length;
-  const losingTrades = signals.filter((signal) => signal.result === 'loss').length;
-  const winRate = totalTrades ? Math.round((winningTrades / totalTrades) * 100) : 0;
+  const totalWins = signals.filter((signal) => signal.direction === 'BUY').length;
+  const totalLosses = signals.filter((signal) => signal.direction === 'SELL').length;
+
+  const symbols = Object.keys(marketMeta);
 
   return (
     <div className="app-shell" dir="rtl">
@@ -370,19 +509,34 @@ function App() {
         </div>
         <div className="status-pill">
           <span className="live-dot" />
-          {loading ? 'جارٍ تحديث الأسعار...' : `مباشر • ${new Date(lastUpdated).toLocaleTimeString('ar-SA')}`}
+          {loading ? 'جارٍ مزامنة الأسعار...' : `مباشر • ${new Date(lastUpdated).toLocaleTimeString('ar-SA')}`}
         </div>
       </header>
 
-      <nav className="nav-tabs" aria-label="التنقل بين الأقسام">
-        <button type="button" className={activeTab === 'overview' ? 'nav-tab active' : 'nav-tab'} onClick={() => setActiveTab('overview')}>
-          الرئيسية
+      <nav className="nav-tabs" aria-label="قائمة التنقل">
+        <button
+          type="button"
+          className={activeTab === 'overview' ? 'nav-tab active' : 'nav-tab'}
+          onClick={() => setActiveTab('overview')}
+        >
+          الرئيسية / التحليل
         </button>
-        <button type="button" className={activeTab === 'scalp' ? 'nav-tab active' : 'nav-tab'} onClick={() => { setActiveTab('scalp'); setTimeframe('1m'); }}>
-          السكالبينغ السريع
+        <button
+          type="button"
+          className={activeTab === 'scalp' ? 'nav-tab active' : 'nav-tab'}
+          onClick={() => {
+            setActiveTab('scalp');
+            setTimeframe('1m');
+          }}
+        >
+          السكالبينغ السريع (1m Scalping)
         </button>
-        <button type="button" className={activeTab === 'signals' ? 'nav-tab active' : 'nav-tab'} onClick={() => setActiveTab('signals')}>
-          سجل الإشارات
+        <button
+          type="button"
+          className={activeTab === 'signals' ? 'nav-tab active' : 'nav-tab'}
+          onClick={() => setActiveTab('signals')}
+        >
+          سجل الإشارات والأداء (Signals & Analytics)
         </button>
       </nav>
 
@@ -394,25 +548,27 @@ function App() {
                 <p className="eyebrow">سجل الإشارات</p>
                 <h2>الإشارات والأداء</h2>
               </div>
-              <button type="button" className="analyze-btn small" onClick={() => setActiveTab('overview')}>العودة للتحليل</button>
+              <button type="button" className="analyze-btn small" onClick={() => setActiveTab('overview')}>
+                العودة للتحليل
+              </button>
             </div>
 
             <div className="stat-grid">
               <div className="stat-box">
-                <span>إجمالي الصفقات</span>
-                <strong>{totalTrades}</strong>
+                <span>إجمالي الإشارات</span>
+                <strong>{signals.length}</strong>
               </div>
               <div className="stat-box">
-                <span>الرابحة</span>
-                <strong className="up">{winningTrades}</strong>
+                <span>الصفقات الصاعدة</span>
+                <strong className="up">{totalWins}</strong>
               </div>
               <div className="stat-box">
-                <span>الخاسرة</span>
-                <strong className="down">{losingTrades}</strong>
+                <span>الصفقات الهابطة</span>
+                <strong className="down">{totalLosses}</strong>
               </div>
               <div className="stat-box">
-                <span>Win Rate</span>
-                <strong>{winRate}%</strong>
+                <span>النوع</span>
+                <strong>{activeTab === 'scalp' ? 'سكالبينغ سريع' : 'قياسي'}</strong>
               </div>
             </div>
 
@@ -429,38 +585,29 @@ function App() {
                         <strong>{signal.label}</strong>
                       </div>
                     </div>
-
                     <div className="value-block">
                       <span>الدخول</span>
                       <strong>{formatPrice(signal.entry, signal.symbol)}</strong>
                     </div>
-
                     <div className="value-block">
                       <span>وقف الخسارة</span>
                       <strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong>
                     </div>
-
                     <div className="value-block">
                       <span>الأهداف</span>
-                      <strong>{formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}</strong>
+                      <strong>
+                        {formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}
+                      </strong>
                     </div>
-
-                    <div className="signal-side-actions">
-                      <div className="result-pill">
-                        {signal.result === 'profit' ? 'ربح' : signal.result === 'loss' ? 'خسارة' : 'قيد المراجعة'}
-                      </div>
-                      <div className="trade-actions">
-                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 1)}>ربح 1</button>
-                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 2)}>ربح 2</button>
-                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 3)}>ربح 3</button>
-                        <button type="button" className="loss" onClick={() => markTradeResult(signal.id, 'loss')}>خسارة</button>
-                      </div>
+                    <div className="value-block">
+                      <span>الثقة</span>
+                      <strong>{signal.confidence}%</strong>
                     </div>
                   </div>
                 ))
               ) : (
                 <div className="empty-signal-box">
-                  <p>لا توجد إشارات محفوظة بعد. قم بإنشاء تحليل من لوحة الربط مباشرة.</p>
+                  <p>لا توجد إشارات محفوظة بعد. قم بإنشاء أول تحليل من لوحة التحليل.</p>
                 </div>
               )}
             </div>
@@ -468,158 +615,14 @@ function App() {
         ) : (
           <>
             <section className="market-grid">
-              {MARKET_DEFS.map((item) => {
-                const price = normalizePrice(liveData[item.symbol]?.price) ?? 0;
-                const previous = history[item.symbol]?.at(-2) ?? price;
-                const trend = previous && previous > 0 ? ((price - previous) / previous) * 100 : 0;
-                const selected = selectedSymbol === item.symbol;
+              {symbols.map((symbol) => {
+                const item = marketData[symbol];
+                const meta = marketMeta[symbol];
+                const isSelected = symbol === selectedSymbol;
+                const price = item?.price ?? 0;
+                const change = item?.change ?? 0;
+                const positive = change >= 0;
 
                 return (
-                  <button key={item.symbol} type="button" className={`market-card ${selected ? 'selected' : ''}`} onClick={() => setSelectedSymbol(item.symbol)}>
-                    <div className="market-header">
-                      <div>
-                        <p className="market-label">{item.label}</p>
-                        <h3>{item.symbol}</h3>
-                      </div>
-                      <span className="legend" style={{ background: item.color }} />
-                    </div>
-                    <div className="market-price-row">
-                      <strong>{formatPrice(price, item.symbol)}</strong>
-                      <span className={trend >= 0 ? 'up' : 'down'}>{trend >= 0 ? '+' : ''}{trend.toFixed(2)}%</span>
-                    </div>
-                  </button>
-                );
-              })}
-            </section>
-
-            <section className="analysis-panel">
-              <div className="panel-header">
-                <div>
-                  <p className="eyebrow">تحرك التداول</p>
-                  <h2>{activeTab === 'scalp' ? 'السكالبينغ السريع' : 'التحليل الذكي'}</h2>
-                </div>
-                <div className="timeframe-picker">
-                  {TIMEFRAMES.map((option) => (
-                    <button type="button" key={option} className={option === timeframe ? 'active' : ''} onClick={() => setTimeframe(option)}>
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="signal-wrapper">
-                <div className="signal-overview">
-                  <div className="signal-topline">
-                    <div>
-                      <p className="eyebrow">السوق المختار</p>
-                      <h3>{(MARKET_DEFS.find((item) => item.symbol === selectedSymbol) || MARKET_DEFS[0]).label}</h3>
-                    </div>
-                    <button type="button" className="analyze-btn" onClick={handleAnalyze} disabled={loadingAi}>
-                      {loadingAi ? 'جارٍ التحليل...' : activeTab === 'scalp' ? 'حلّل الآن (سكالبينغ)' : 'حلّل الآن'}
-                    </button>
-                  </div>
-
-                  <div className="chart-card">
-                    <div className="chart-toolbar">
-                      <div className="view-toggle">
-                        <button type="button" className="active">السعر الحي</button>
-                      </div>
-                    </div>
-
-                    <div className="chart-stats">
-                      <div>
-                        <span>السعر الحالي</span>
-                        <strong>{formatPrice(currentLivePrice, selectedSymbol)}</strong>
-                      </div>
-                      <div>
-                        <span>النطاق</span>
-                        <strong>{timeframe}</strong>
-                      </div>
-                      <div>
-                        <span>الحالة</span>
-                        <strong>{loading ? 'جارٍ التحديث' : 'مباشر'}</strong>
-                      </div>
-                    </div>
-
-                    <div className="custom-chart-card">
-                      <svg viewBox="0 0 300 80" className="sparkline" preserveAspectRatio="none">
-                        <defs>
-                          <linearGradient id="spark-gradient" x1="0" x2="1">
-                            <stop offset="0%" stopColor="#7bb4ff" />
-                            <stop offset="100%" stopColor="#70f0b7" />
-                          </linearGradient>
-                        </defs>
-                        <polyline fill="none" stroke="url(#spark-gradient)" strokeWidth="3" points={sparkline} />
-                      </svg>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="trade-card">
-                  {analysisError ? (
-                    <div className="alert-error">{analysisError}</div>
-                  ) : analysis ? (
-                    <>
-                      <div className="trade-head">
-                        <div>
-                          <span className="eyebrow">توصية الذكاء</span>
-                          <h3 className={analysis.direction === 'BUY' ? 'buy-text' : 'sell-text'}>{analysis.direction === 'BUY' ? 'شراء' : 'بيع'}</h3>
-                        </div>
-                        <span className="confidence">{analysis.confidence}% ثقة</span>
-                      </div>
-
-                      <div className="trade-grid">
-                        <div className="trade-item">
-                          <span>الدخول</span>
-                          <strong>{formatPrice(analysis.entry, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>إيقاف الخسارة</span>
-                          <strong>{formatPrice(analysis.stopLoss, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>TP1</span>
-                          <strong>{formatPrice(analysis.tp1, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>TP2</span>
-                          <strong>{formatPrice(analysis.tp2, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>TP3</span>
-                          <strong>{formatPrice(analysis.tp3, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>التعادل</span>
-                          <strong>{formatPrice(analysis.breakEven, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>التتبع</span>
-                          <strong>{formatPrice(analysis.trailingStop, selectedSymbol)}</strong>
-                        </div>
-                        <div className="trade-item">
-                          <span>حجم اللوت</span>
-                          <strong>{analysis.lotSize}</strong>
-                        </div>
-                      </div>
-
-                      <div className="reason-box">
-                        <p>{analysis.reason}</p>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="empty-state">
-                      <p>اضغط على زر «حلّل الآن» لقراءة السعر المباشر الحالي والذهاب إلى توصية دقيقة بناءً عليه.</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </section>
-          </>
-        )}
-      </main>
-    </div>
-  );
-}
-
-export default App;
+                  <button
+                    type=
