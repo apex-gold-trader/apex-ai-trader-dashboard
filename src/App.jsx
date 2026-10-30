@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
@@ -13,7 +13,6 @@ const MARKET_DEFS = [
 ];
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-
 const normalizePrice = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
@@ -127,7 +126,7 @@ async function fetchGoldPrice() {
 
       if (payload?.rates && payload.rates.XAU) return Number(payload.rates.XAU);
     } catch {
-      // try next source
+      // continue to next source if a provider fails
     }
   }
 
@@ -288,6 +287,12 @@ function App() {
     });
     return initial;
   });
+
+  const liveDataRef = useRef(liveData);
+
+  useEffect(() => {
+    liveDataRef.current = liveData;
+  }, [liveData]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
