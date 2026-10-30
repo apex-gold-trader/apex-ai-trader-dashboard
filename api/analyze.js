@@ -16,13 +16,8 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-    if (!apiKey) {
-      return res.status(401).json({
-        success: false,
-        error: 'Missing GEMINI_API_KEY. Add it in Vercel -> Project -> Settings -> Environment Variables',
-      });
-    }
+    // مفتاح API مباشر وصريح لضمان عدم حدوث أي خطأ في Vercel
+    const apiKey = 'AQ.Ab8RN6L8cpGu6IIBo3MtbBfkfpQXFRHSeeBeKGmg_kXcui1M9g';
 
     const prompt = `
       أنت محلل فني احترافي للأسواق المالية.
@@ -113,7 +108,7 @@ export default async function handler(req, res) {
     };
 
     return res.status(200).json({ success: true, trade });
-  } catch (error) {
+  }اضغط(error) {
     return res.status(200).json({
       success: false,
       error: 'Analysis unavailable',
@@ -123,4 +118,4 @@ export default async function handler(req, res) {
 
 function clampNumber(value, min, max) {
   return Math.min(Math.max(Number(value || min), min), max);
-                                                                                                                                        }
+}
