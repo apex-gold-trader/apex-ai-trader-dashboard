@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
 const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
@@ -35,11 +35,6 @@ const formatPrice = (value, symbol) => {
   return numeric.toFixed(2);
 };
 
-const roundToPrecision = (value, precision) => {
-  const base = 10 ** precision;
-  return Math.round((Number(value) || 0) * base) / base;
-};
-
 const createSparklinePoints = (values) => {
   if (!Array.isArray(values) || !values.length) return '';
 
@@ -59,91 +54,43 @@ const createSparklinePoints = (values) => {
     .join(' ');
 };
 
-const getMarketPrecision = (symbol) => {
-  const def = MARKET_DEFS.find((item) => item.symbol === symbol);
-  return def?.precision ?? 2;
-};
-
-const getBaseVolatility = (symbol) => {
-  const map = {
-    XAUUSD: 1.8,
-    BTCUSD: 160,
-    EURUSD: 0.0023,
-    ETHUSD: 7.8,
-    NAS100: 18,
-  };
-  return map[symbol] ?? 2;
-};
-
-const getDirectionalScore = (values) => {
-  if (!Array.isArray(values) || values.length < 2) return 0;
-
-  const clean = values.filter((value) => Number.isFinite(Number(value))).map(Number);
-  if (clean.length < 2) return 0;
-
-  const recent = clean.slice(-12);
-  const last = recent.at(-1) ?? clean.at(-1);
-  const first = recent[0] ?? clean[0];
-  const priceMid = average(recent);
-  const momentum = last - first;
-  const distanceBias = last - priceMid;
-  const deltas = recent.slice(1).map((value, index) => value - recent[index]);
-  const slope = average(deltas.filter((value) => Number.isFinite(value)));
-
-  return distanceBias * 1.2 + momentum * 1.6 + slope * 3;
-};
-
-const buildFeedbackSummary = (signals = []) => {
-  if (!signals.length) return 'لا يوجد سجل صفقات مسجلة حتى الآن.';
-
-  return signals
-    .slice(0, 6)
-    .map((trade, index) => {
-      const resultLabel = trade.result === 'profit' ? 'ربح' : trade.result === 'loss' ? 'خسارة' : 'قيد المراجعة';
-      const hitLabel = trade.tpHits ? ` | الأهداف: ${trade.tpHits}` : '';
-      return `${index + 1}. ${trade.direction} ${trade.symbol} | ${resultLabel}${hitLabel} | الثقة ${trade.confidence}%`;
-    })
-    .join('; ');
+const MARKET_RANGES = {
+  XAUUSD: { base: 1.8, precision: 2 },
+  BTCUSD: { base: 180, precision: 2 },
+  EURUSD: { base: 0.0025, precision: 5 },
+  ETHUSD: { base: 8.5, precision: 2 },
+  NAS100: { base: 20, precision: 2 },
 };
 
 async function fetchGoldPrice() {
-  const candidates = ['https://api.gold-api.com/price/XAU', 'https://api.metals.live/v1/spot'];
+  const sources = ['https://api.gold-api.com/price/XAU', 'https://api.metals.live/v1/spot'];
 
-  for (const url of candidates) {
+  for (const url of sources) {
     try {
-      const response = await fetch(url, { cache: 'no-store' });
-      if (!response.ok) continue;
-
-      const payload = await response.json();
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) continue;
+      const payload = await res.json();
 
       if (typeof payload?.price === 'number') return payload.price;
-
       if (Array.isArray(payload)) {
-        const gold = payload.find((item) => item?.metal === 'gold' || item?.symbol === 'XAUUSD' || item?.code === 'XAU');
-        const value = gold?.price ?? gold?.value ?? gold?.last_price ?? gold?.p ?? null;
+        const match = payload.find((item) => item?.metal === 'gold' || item?.symbol === 'XAUUSD' || item?.code === 'XAU');
+        const value = match?.price ?? match?.value ?? match?.last_price ?? match?.p ?? null;
         if (value) return Number(value);
       }
-
       if (payload?.rates && payload.rates.XAU) return Number(payload.rates.XAU);
     } catch {
-      // continue to next source if a provider fails
+      // continue to next source
     }
   }
-
   return null;
 }
 
-async function fetchForexPrice(symbol) {
-  const pairs = { EURUSD: { from: 'EUR', to: 'USD' } };
-  const pair = pairs[symbol];
-  if (!pair) return null;
-
+async function fetchForexPrice() {
   try {
-    const response = await fetch(`https://api.frankfurter.app/latest?from=${pair.from}&to=${pair.to}`, { cache: 'no-store' });
-    if (!response.ok) return null;
-
-    const payload = await response.json();
-    return Number(payload?.rates?.[pair.to]);
+    const res = await fetch('https://api.frankfurter.app/latest?from=EUR&to=USD', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const payload = await res.json();
+    return Number(payload?.rates?.USD ?? null);
   } catch {
     return null;
   }
@@ -151,13 +98,11 @@ async function fetchForexPrice(symbol) {
 
 async function fetchCryptoPrice(symbol) {
   const pair = symbol === 'BTCUSD' ? 'BTCUSDT' : 'ETHUSDT';
-
   try {
-    const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`, { cache: 'no-store' });
-    if (!response.ok) return null;
-
-    const payload = await response.json();
-    return Number(payload?.price);
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const payload = await res.json();
+    return Number(payload?.price ?? null);
   } catch {
     return null;
   }
@@ -165,20 +110,17 @@ async function fetchCryptoPrice(symbol) {
 
 async function fetchNasdaqPrice() {
   try {
-    const response = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d', {
+    const res = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?interval=1m&range=1d', {
       cache: 'no-store',
       headers: { Accept: 'application/json' },
     });
-
-    if (!response.ok) return null;
-
-    const payload = await response.json();
+    if (!res.ok) return null;
+    const payload = await res.json();
     const price = payload?.chart?.result?.[0]?.meta?.regularMarketPrice
       ?? payload?.chart?.result?.[0]?.meta?.previousClose
       ?? payload?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.at(-1)
       ?? null;
-
-    return normalizePrice(price);
+    return Number(price ?? 0);
   } catch {
     return null;
   }
@@ -186,69 +128,59 @@ async function fetchNasdaqPrice() {
 
 async function fetchMarketPrice(symbol) {
   if (symbol === 'XAUUSD') return fetchGoldPrice();
-  if (symbol === 'EURUSD') return fetchForexPrice(symbol);
+  if (symbol === 'EURUSD') return fetchForexPrice();
   if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return fetchCryptoPrice(symbol);
   if (symbol === 'NAS100') return fetchNasdaqPrice();
   return null;
 }
 
-function buildDynamicTrade({ symbol, timeframe, series, mode }) {
-  const values = Array.isArray(series) && series.length
-    ? series.map((value) => Number(value)).filter((value) => Number.isFinite(value))
-    : [Number(series) || 0];
+function buildStrongScalpTrade({ symbol, timeframe, series = [], mode = 'scalp' }) {
+  const values = Array.isArray(series) ? series.filter((value) => Number.isFinite(Number(value))).map(Number) : [];
+  const last = Number(values.at(-1) ?? 0);
+  const previous = Number(values.at(-2) ?? last);
+  const avgFast = average(values.slice(-8));
+  const avgSlow = average(values.slice(-20));
+  const bias = last - avgSlow;
+  const velocity = last - previous;
+  const direction = bias >= 0 || velocity >= 0 ? 'BUY' : 'SELL';
 
-  const price = normalizePrice(values.at(-1)) ?? 0;
-  const score = getDirectionalScore(values);
-  const direction = score >= 0 ? 'BUY' : 'SELL';
-
-  const precision = getMarketPrecision(symbol);
-  const baseVol = getBaseVolatility(symbol);
-  const recentDelta = average(
-    values.slice(1).map((value, index) => Math.abs(value - values[index] || 0))
-  ) || baseVol;
-
+  const config = MARKET_RANGES[symbol] ?? { base: 2, precision: 2 };
+  const baseDistance = config.base;
   const stopDistance = clamp(
-    (recentDelta * (mode === 'scalp' ? 0.9 : 1.3)) + (Math.abs(score) / 9000 || 0),
-    baseVol * 0.55,
-    baseVol * 4.8
+    Math.abs(last - avgFast) * 0.9 + baseDistance * (mode === 'scalp' ? 0.7 : 1.2),
+    baseDistance * 0.65,
+    baseDistance * 3.6
   );
 
-  const tpBase = stopDistance * (mode === 'scalp' ? 1.8 : 2.4);
-  const tp1Distance = tpBase * (1 + clamp(Math.abs(score) / 8000, 0, 0.75));
-  const tp2Distance = tpBase * (1.7 + clamp(Math.abs(score) / 10000, 0, 1.1));
-  const tp3Distance = tpBase * (2.5 + clamp(Math.abs(score) / 12000, 0, 1.4));
+  const tp1Distance = stopDistance * (mode === 'scalp' ? 1.7 : 2.2);
+  const tp2Distance = stopDistance * (mode === 'scalp' ? 2.8 : 3.8);
+  const tp3Distance = stopDistance * (mode === 'scalp' ? 4.2 : 5.6);
 
-  const stopLoss = direction === 'BUY' ? price - stopDistance : price + stopDistance;
-  const tp1 = direction === 'BUY' ? price + tp1Distance : price - tp1Distance;
-  const tp2 = direction === 'BUY' ? price + tp2Distance : price - tp2Distance;
-  const tp3 = direction === 'BUY' ? price + tp3Distance : price - tp3Distance;
-  const breakEven = direction === 'BUY' ? price + stopDistance * 0.35 : price - stopDistance * 0.35;
-  const trailingStop = direction === 'BUY' ? price + stopDistance * 0.6 : price - stopDistance * 0.6;
-
-  const confidence = clamp(
-    Math.round(70 + Math.min(Math.abs(score) / 180, 18) + (mode === 'scalp' ? 4 : 0)),
-    68,
-    96
-  );
-
-  const lotSize = Number((mode === 'scalp' ? 0.08 : 0.12).toFixed(2));
+  const entry = last;
+  const stopLoss = direction === 'BUY' ? entry - stopDistance : entry + stopDistance;
+  const tp1 = direction === 'BUY' ? entry + tp1Distance : entry - tp1Distance;
+  const tp2 = direction === 'BUY' ? entry + tp2Distance : entry - tp2Distance;
+  const tp3 = direction === 'BUY' ? entry + tp3Distance : entry - tp3Distance;
+  const breakEven = direction === 'BUY' ? entry + stopDistance * 0.3 : entry - stopDistance * 0.3;
+  const trailingStop = direction === 'BUY' ? entry + stopDistance * 0.5 : entry - stopDistance * 0.5;
+  const confidence = clamp(Math.round(78 + Math.abs(bias) / Math.max(baseDistance * 8, 1) + (mode === 'scalp' ? 10 : 4)), 72, 96);
 
   return {
     direction,
-    entry: roundToPrecision(price, precision),
-    stopLoss: roundToPrecision(stopLoss, precision),
-    tp1: roundToPrecision(tp1, precision),
-    tp2: roundToPrecision(tp2, precision),
-    tp3: roundToPrecision(tp3, precision),
-    breakEven: roundToPrecision(breakEven, precision),
-    trailingStop: roundToPrecision(trailingStop, precision),
-    lotSize,
+    entry,
+    stopLoss,
+    tp1,
+    tp2,
+    tp3,
+    breakEven,
+    trailingStop,
+    lotSize: Number((mode === 'scalp' ? 0.12 : 0.25).toFixed(2)),
     confidence,
     timeframe,
-    strategy: mode === 'scalp' ? 'سكالبينغ سريع • توازن اتجاهي ديناميكي' : 'تحليل اتجاه سوقي • أهداف متحركة وفق السيولة',
+    strategy: mode === 'scalp' ? 'سكالبينغ فائق السرعة • زخم حقيقي + إيقاف ديناميكي' : 'تحليل مباشر مع أهداف متحركة',
     mode,
     symbol,
-    reason: `${direction === 'BUY' ? 'الزخم الصاعد' : 'الزخم الهابط'} يهيمن على السوق في ${timeframe} مع موازنة بين الاتجاه والسعر الحالي، مع ضبط وقف الخسارة والأهداف ديناميكيًا حسب التقلب الفعلي وخصائص الأداة.`,
+    reason: `السعر الحالي ${formatPrice(entry, symbol)} يحافظ على ${direction === 'BUY' ? 'زخم صاعد' : 'زخم هابط'} واضح في ${timeframe}, مع تركيز على مناطق السيولة والتقلب الحقيقي لاختراق أهداف الربح وتنبيه وقف الخسارة على مبدأ السلامة الديناميكية.`,
     snapshotAt: Date.now(),
   };
 }
@@ -260,10 +192,11 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [loadingAi, setLoadingAi] = useState(false);
   const [analysis, setAnalysis] = useState(null);
+  const [analysisError, setAnalysisError] = useState('');
   const [lastUpdated, setLastUpdated] = useState(Date.now());
+
   const [signals, setSignals] = useState(() => {
     if (typeof window === 'undefined') return [];
-
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       return raw ? JSON.parse(raw) : [];
@@ -288,12 +221,6 @@ function App() {
     return initial;
   });
 
-  const liveDataRef = useRef(liveData);
-
-  useEffect(() => {
-    liveDataRef.current = liveData;
-  }, [liveData]);
-
   useEffect(() => {
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(signals));
@@ -304,24 +231,28 @@ function App() {
     let cancelled = false;
 
     const refresh = async () => {
+      const entries = await Promise.all(
+        MARKET_DEFS.map(async (item) => {
+          try {
+            const price = await fetchMarketPrice(item.symbol);
+            return { symbol: item.symbol, price: normalizePrice(price) };
+          } catch {
+            return { symbol: item.symbol, price: null };
+          }
+        })
+      );
+
+      if (cancelled) return;
+
       const nextState = {};
       const nextHistory = {};
+      entries.forEach((entry) => {
+        if (!entry.price) return;
+        nextState[entry.symbol] = { price: entry.price, updatedAt: Date.now() };
+        nextHistory[entry.symbol] = [...(history[entry.symbol] || []), entry.price].slice(-60);
+      });
 
-      for (const item of MARKET_DEFS) {
-        try {
-          const price = await fetchMarketPrice(item.symbol);
-          const normalized = normalizePrice(price);
-
-          if (!cancelled && normalized) {
-            nextState[item.symbol] = { price: normalized, updatedAt: Date.now() };
-            nextHistory[item.symbol] = [...(history[item.symbol] || []), normalized].slice(-60);
-          }
-        } catch {
-          // ignore failed source fetches
-        }
-      }
-
-      if (!cancelled && Object.keys(nextState).length) {
+      if (Object.keys(nextState).length) {
         setLiveData((previous) => ({ ...previous, ...nextState }));
         setHistory((previous) => ({ ...previous, ...nextHistory }));
         setLastUpdated(Date.now());
@@ -332,7 +263,6 @@ function App() {
 
     refresh();
     const interval = window.setInterval(refresh, LIVE_REFRESH_MS);
-
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -384,36 +314,25 @@ function App() {
   const handleAnalyze = async () => {
     const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
     const series = history[selectedSymbol]?.length ? history[selectedSymbol] : [currentLivePrice].filter(Boolean);
-    const activePrice = normalizePrice(series.at(-1)) ?? currentLivePrice;
-    const rsiValue = clamp(50 + ((series.at(-1) - average(series)) / Math.max(average(series) || 1, 0.0001)) * 100, 20, 80);
+    const payload = {
+      symbol: selectedSymbol,
+      timeframe,
+      mode,
+      current: {
+        price: normalizePrice(series.at(-1)) ?? currentLivePrice,
+        indicators: {
+          rsi: clamp(50 + ((series.at(-1) ?? currentLivePrice) - average(series || [currentLivePrice])) / Math.max(average(series || [currentLivePrice]) || 1, 0.0001) * 100, 20, 80),
+          emaShort: average(series.slice(-7) || [currentLivePrice]),
+          emaLong: average(series.slice(-20) || [currentLivePrice]),
+          macd: (series.at(-1) ?? currentLivePrice) - average(series.slice(-3) || [currentLivePrice]),
+        },
+      },
+    };
 
     setLoadingAi(true);
+    setAnalysisError('');
 
     try {
-      const trade = buildDynamicTrade({
-        symbol: selectedSymbol,
-        timeframe,
-        series,
-        mode,
-      });
-
-      const payload = {
-        symbol: selectedSymbol,
-        timeframe,
-        mode,
-        current: {
-          price: activePrice,
-          indicators: {
-            rsi: rsiValue,
-            emaShort: average(series.slice(-7)),
-            emaLong: average(series.slice(-20)),
-            macd: (series.at(-1) ?? 0) - average(series.slice(-3)),
-          },
-        },
-        feedbackSummary: buildFeedbackSummary(signals.slice(0, 6)),
-        tradeHistory: signals.slice(0, 6),
-      };
-
       const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -421,19 +340,17 @@ function App() {
       });
 
       const data = await response.json().catch(() => ({}));
-      const nextTrade = data?.trade && data.trade?.entry ? data.trade : trade;
 
+      if (!response.ok || !data?.success || !data?.trade) {
+        throw new Error(data?.error || 'Gemini analysis is unavailable right now.');
+      }
+
+      const nextTrade = data.trade;
       setAnalysis(nextTrade);
       persistSignal(nextTrade);
-    } catch {
-      const fallbackTrade = buildDynamicTrade({
-        symbol: selectedSymbol,
-        timeframe,
-        series,
-        mode,
-      });
-      setAnalysis(fallbackTrade);
-      persistSignal(fallbackTrade);
+    } catch (error) {
+      setAnalysis(null);
+      setAnalysisError(error.message || 'Failed to generate Gemini trade signal.');
     } finally {
       setLoadingAi(false);
     }
@@ -477,9 +394,7 @@ function App() {
                 <p className="eyebrow">سجل الإشارات</p>
                 <h2>الإشارات والأداء</h2>
               </div>
-              <button type="button" className="analyze-btn small" onClick={() => setActiveTab('overview')}>
-                العودة للتحليل
-              </button>
+              <button type="button" className="analyze-btn small" onClick={() => setActiveTab('overview')}>العودة للتحليل</button>
             </div>
 
             <div className="stat-grid">
@@ -527,32 +442,18 @@ function App() {
 
                     <div className="value-block">
                       <span>الأهداف</span>
-                      <strong>
-                        {formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}
-                      </strong>
+                      <strong>{formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}</strong>
                     </div>
 
                     <div className="signal-side-actions">
                       <div className="result-pill">
-                        {signal.result === 'profit'
-                          ? 'ربح'
-                          : signal.result === 'loss'
-                            ? 'خسارة'
-                            : 'قيد المراجعة'}
+                        {signal.result === 'profit' ? 'ربح' : signal.result === 'loss' ? 'خسارة' : 'قيد المراجعة'}
                       </div>
                       <div className="trade-actions">
-                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 1)}>
-                          ربح 1
-                        </button>
-                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 2)}>
-                          ربح 2
-                        </button>
-                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 3)}>
-                          ربح 3
-                        </button>
-                        <button type="button" className="loss" onClick={() => markTradeResult(signal.id, 'loss')}>
-                          خسارة
-                        </button>
+                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 1)}>ربح 1</button>
+                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 2)}>ربح 2</button>
+                        <button type="button" onClick={() => markTradeResult(signal.id, 'profit', 3)}>ربح 3</button>
+                        <button type="button" className="loss" onClick={() => markTradeResult(signal.id, 'loss')}>خسارة</button>
                       </div>
                     </div>
                   </div>
@@ -584,10 +485,7 @@ function App() {
                     </div>
                     <div className="market-price-row">
                       <strong>{formatPrice(price, item.symbol)}</strong>
-                      <span className={trend >= 0 ? 'up' : 'down'}>
-                        {trend >= 0 ? '+' : ''}
-                        {trend.toFixed(2)}%
-                      </span>
+                      <span className={trend >= 0 ? 'up' : 'down'}>{trend >= 0 ? '+' : ''}{trend.toFixed(2)}%</span>
                     </div>
                   </button>
                 );
@@ -658,14 +556,14 @@ function App() {
                 </div>
 
                 <div className="trade-card">
-                  {analysis ? (
+                  {analysisError ? (
+                    <div className="alert-error">{analysisError}</div>
+                  ) : analysis ? (
                     <>
                       <div className="trade-head">
                         <div>
                           <span className="eyebrow">توصية الذكاء</span>
-                          <h3 className={analysis.direction === 'BUY' ? 'buy-text' : 'sell-text'}>
-                            {analysis.direction === 'BUY' ? 'شراء' : 'بيع'}
-                          </h3>
+                          <h3 className={analysis.direction === 'BUY' ? 'buy-text' : 'sell-text'}>{analysis.direction === 'BUY' ? 'شراء' : 'بيع'}</h3>
                         </div>
                         <span className="confidence">{analysis.confidence}% ثقة</span>
                       </div>
