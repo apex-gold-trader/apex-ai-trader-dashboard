@@ -20,12 +20,14 @@ export default async function handler(req, res) {
     if (!apiKey) {
       return res.status(401).json({
         success: false,
-        error: 'Missing GEMINI_API_KEY',
+        error: 'Missing GEMINI_API_KEY. Add it in Vercel -> Project -> Settings -> Environment Variables',
       });
     }
 
     const prompt = `
-      أنت محلل فني احترافي للأسواق المالية. تحليل الأصل ${symbol} على الإطار ${timeframe}.
+      أنت محلل فني احترافي للأسواق المالية.
+      الأصل: ${symbol}
+      الإطار الزمني: ${timeframe}
       السعر الحالي: ${price}
       RSI: ${rsi}
       EMA قصيرة: ${emaShort}
@@ -34,13 +36,13 @@ export default async function handler(req, res) {
       نوع التحليل: ${mode}
 
       المطلوب:
-      1) تحديد الاتجاه: BUY أو SELL.
+      1) تحديد الاتجاه BUY أو SELL.
       2) سعر الدخول، وقف الخسارة، TP1، TP2، TP3.
       3) حجم اللوت.
-      4) نقطة التعادل Breakeven.
-      5) trust/confidence من 0 إلى 100.
-      6) شرح موجز بالعربية.
-      7) تجنب فخاخ السيولة (Stop Hunt) ووضع الوقف خلف مناطق الدعم/المقاومة الحقيقية.
+      4) نقطة Breakeven.
+      5) confidence من 0 إلى 100.
+      6) شرح بالعربية.
+      7) تجنب فخاخ السيولة، واحتفظ بوقف الخسارة في مناطق أمان خلف الدوامات الوهمية.
 
       أعد JSON فقط بدون Markdown:
       {
@@ -54,90 +56,63 @@ export default async function handler(req, res) {
         "breakEven": 1235.2,
         "trailingStop": 1236.1,
         "confidence": 82,
-        "reason": "نص بالعربية"
+        "reason": "شرح بالعربية"
       }
     `;
 
-    const candidateModels = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
-    let lastError = null;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-    for (const model of candidateModels) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 512,
+        },
+      }),
+    });
 
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.2,
-              maxOutputTokens: 512,
-            },
-          }),
-        });
-
-        if (response.status === 404) {
-          lastError = null;
-          continue;
-        }
-
-        if (response.status === 401 || response.status === 403) {
-          return res.status(401).json({
-            success: false,
-            error: 'Gemini API key is invalid, expired, or not authorized for this project.',
-          });
-        }
-
-        if (!response.ok) {
-          const text = await response.text();
-          lastError = text;
-          continue;
-        }
-
-        const responseData = await response.json();
-        const rawText = responseData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const cleaned = rawText.replace(/```json|```/g, '').trim();
-
-        if (!cleaned) {
-          throw new Error('empty');
-        }
-
-        let parsed;
-        try {
-          parsed = JSON.parse(cleaned);
-        } catch {
-          throw new Error('malformed');
-        }
-
-        const trade = {
-          direction: parsed.direction || (rsi > 55 ? 'SELL' : 'BUY'),
-          entry: Number(parsed.entry ?? price),
-          stopLoss: Number(parsed.stopLoss ?? (parsed.direction === 'BUY' ? price - 1.8 : price + 1.8)),
-          tp1: Number(parsed.tp1 ?? (parsed.direction === 'BUY' ? price + 3.2 : price - 3.2)),
-          tp2: Number(parsed.tp2 ?? (parsed.direction === 'BUY' ? price + 5.8 : price - 5.8)),
-          tp3: Number(parsed.tp3 ?? (parsed.direction === 'BUY' ? price + 8.2 : price - 8.2)),
-          lotSize: Number(parsed.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25)),
-          breakEven: Number(parsed.breakEven ?? price),
-          trailingStop: Number(parsed.trailingStop ?? price),
-          confidence: clampNumber(parsed.confidence ?? 82, 68, 98),
-          reason: parsed.reason || 'تحليل ذكي وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.',
-          timeframe,
-          strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
-          mode,
-          symbol,
-        };
-
-        return res.status(200).json({ success: true, trade });
-      } catch {
-        lastError = null;
-      }
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Gemini API error: ${response.status} - ${errText}`);
     }
 
-    return res.status(200).json({
-      success: false,
-      error: 'Analysis unavailable',
-    });
+    const responseData = await response.json();
+    const rawText = responseData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const cleaned = rawText.replace(/```json|```/g, '').trim();
+
+    if (!cleaned) {
+      throw new Error('empty');
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      throw new Error('malformed');
+    }
+
+    const trade = {
+      direction: parsed.direction || (rsi > 55 ? 'SELL' : 'BUY'),
+      entry: Number(parsed.entry ?? price),
+      stopLoss: Number(parsed.stopLoss ?? (parsed.direction === 'BUY' ? price - 1.8 : price + 1.8)),
+      tp1: Number(parsed.tp1 ?? (parsed.direction === 'BUY' ? price + 3.2 : price - 3.2)),
+      tp2: Number(parsed.tp2 ?? (parsed.direction === 'BUY' ? price + 5.8 : price - 5.8)),
+      tp3: Number(parsed.tp3 ?? (parsed.direction === 'BUY' ? price + 8.2 : price - 8.2)),
+      lotSize: Number(parsed.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25)),
+      breakEven: Number(parsed.breakEven ?? price),
+      trailingStop: Number(parsed.trailingStop ?? price),
+      confidence: clampNumber(parsed.confidence ?? 82, 68, 98),
+      reason: parsed.reason || 'تحليل دقيق وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.',
+      timeframe,
+      strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
+      mode,
+      symbol,
+    };
+
+    return res.status(200).json({ success: true, trade });
   } catch (error) {
     return res.status(200).json({
       success: false,
@@ -148,4 +123,4 @@ export default async function handler(req, res) {
 
 function clampNumber(value, min, max) {
   return Math.min(Math.max(Number(value || min), min), max);
-}
+                                                                                                                                        }
