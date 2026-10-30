@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+    const apiKey = 'AQ.Ab8RN6LFwqmxfTfLs3lyDJd3_NU5IMw1FdJx93GEszMi69uUaQ';
     if (!apiKey) {
       return res.status(500).json({
         success: false,
