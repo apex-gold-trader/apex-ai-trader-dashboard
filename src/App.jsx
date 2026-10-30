@@ -20,6 +20,14 @@ const symbolMap = {
   NAS100: { ticker: 'NASDAQ:IXIC', market: 'america' },
 };
 
+const DEFAULT_BASES = {
+  XAUUSD: 2346.42,
+  BTCUSD: 67740.12,
+  EURUSD: 1.0884,
+  ETHUSD: 3592.77,
+  NAS100: 19036.2,
+};
+
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 const formatPrice = (value, symbol) => {
@@ -31,20 +39,6 @@ const formatPrice = (value, symbol) => {
   if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return `$${num.toFixed(2)}`;
   return num.toFixed(4);
 };
-
-function buildTrendSeries(base, drift, volatility, length = 42) {
-  const series = [];
-  let current = base;
-
-  for (let i = 0; i < length; i += 1) {
-    const wave = Math.sin((i / Math.max(length, 1)) * 10) * volatility;
-    const noise = (Math.random() - 0.5) * volatility * 1.5;
-    current = Math.max(current + drift + wave + noise, base * 0.7);
-    series.push(Number(current.toFixed(6)));
-  }
-
-  return series;
-}
 
 function average(values) {
   if (!values.length) return 0;
@@ -67,9 +61,9 @@ function getRsi(series) {
   let losses = 0;
 
   for (let i = 1; i < 15; i += 1) {
-    const difference = series[i] - series[i - 1];
-    if (difference >= 0) gains += difference;
-    else losses += Math.abs(difference);
+    const diff = series[i] - series[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses += Math.abs(diff);
   }
 
   const avgGain = gains / 14;
@@ -93,53 +87,53 @@ function getBollinger(series) {
   return { upper: mid + std * 2, lower: mid - std * 2 };
 }
 
-function generateMarketData() {
-  const baseData = {
-    XAUUSD: 2346.42,
-    BTCUSD: 67740.12,
-    EURUSD: 1.0884,
-    ETHUSD: 3592.77,
-    NAS100: 19036.2,
-  };
-
-  const stateMap = {
-    XAUUSD: { drift: 1.8, volatility: 4.5 },
-    BTCUSD: { drift: 150, volatility: 150 },
-    EURUSD: { drift: 0.00038, volatility: 0.0012 },
+function buildSeriesBasedOnPrice(symbol, price) {
+  const signalSensitivity = {
+    XAUUSD: { drift: 0.08, volatility: 0.25 },
+    BTCUSD: { drift: 110, volatility: 180 },
+    EURUSD: { drift: 0.00012, volatility: 0.00045 },
     ETHUSD: { drift: 8, volatility: 20 },
-    NAS100: { drift: 10, volatility: 32 },
+    NAS100: { drift: 12, volatility: 26 },
   };
 
-  const result = {};
+  const config = signalSensitivity[symbol] || { drift: 0.5, volatility: 1 };
+  const points = [];
+  let current = price;
 
-  Object.entries(baseData).forEach(([symbol, base]) => {
-    const state = stateMap[symbol];
-    const series = buildTrendSeries(base, state.drift, state.volatility, 42);
-    const last = series[series.length - 1];
-    const previous = series[series.length - 2] || last;
-    const rsi = getRsi(series);
-    const emaShort = getEma(series, 9);
-    const emaLong = getEma(series, 21);
-    const macd = getMacd(series);
-    const bollinger = getBollinger(series);
+  for (let i = 0; i < 28; i += 1) {
+    const wave = Math.sin((i / 7) + (price / 1000)) * config.volatility;
+    const noise = ((Math.random() - 0.5) * config.volatility * 2.2);
+    current = Math.max(current + config.drift + wave + noise, price * 0.85);
+    points.push(Number(current.toFixed(symbol === 'EURUSD' ? 5 : 2)));
+  }
 
-    result[symbol] = {
-      price: Number(last.toFixed(symbol === 'EURUSD' ? 5 : 2)),
-      change: Number((((last - previous) / Math.max(previous, 0.0001)) * 100).toFixed(3)),
-      series,
-      indicators: {
-        rsi,
-        emaShort,
-        emaLong,
-        macd,
-        bollingerUpper: bollinger.upper,
-        bollingerLower: bollinger.lower,
-      },
-      updatedAt: Date.now(),
-    };
-  });
+  return points;
+}
 
-  return result;
+function buildSnapshot(symbol, price) {
+  const series = buildSeriesBasedOnPrice(symbol, price);
+  const last = Number(series[series.length - 1]);
+  const prev = Number(series[series.length - 2] ?? last);
+  const rsi = getRsi(series);
+  const emaShort = getEma(series, 9);
+  const emaLong = getEma(series, 21);
+  const macd = getMacd(series);
+  const bb = getBollinger(series);
+
+  return {
+    price: Number(last.toFixed(symbol === 'EURUSD' ? 5 : 2)),
+    change: Number((((last - prev) / Math.max(prev, 0.0001)) * 100).toFixed(3)),
+    series,
+    indicators: {
+      rsi,
+      emaShort,
+      emaLong,
+      macd,
+      bollingerUpper: bb.upper,
+      bollingerLower: bb.lower,
+    },
+    updatedAt: Date.now(),
+  };
 }
 
 async function fetchTradingViewQuote(symbol) {
@@ -165,27 +159,21 @@ async function fetchTradingViewQuote(symbol) {
 }
 
 async function fetchLiveMarketDataFromTradingView() {
-  const base = generateMarketData();
   const results = await Promise.allSettled(
     SYMBOLS.map(async (symbol) => ({ symbol, quote: await fetchTradingViewQuote(symbol) })),
   );
 
   const next = {};
+
   results.forEach((result) => {
     if (result.status !== 'fulfilled') return;
     const { symbol, quote } = result.value;
     if (!quote) return;
-
-    const current = base[symbol];
-    next[symbol] = {
-      ...current,
-      price: Number(quote),
-      updatedAt: Date.now(),
-    };
+    next[symbol] = buildSnapshot(symbol, Number(quote));
   });
 
   SYMBOLS.forEach((symbol) => {
-    if (!next[symbol]) next[symbol] = base[symbol];
+    if (!next[symbol]) next[symbol] = buildSnapshot(symbol, Number(DEFAULT_BASES[symbol] ?? 0));
   });
 
   return next;
@@ -210,7 +198,13 @@ function buildSparkline(series) {
 
 function App() {
   const [timeframe, setTimeframe] = useState('1m');
-  const [marketData, setMarketData] = useState(generateMarketData());
+  const [marketData, setMarketData] = useState(() => {
+    const initial = {};
+    SYMBOLS.forEach((symbol) => {
+      initial[symbol] = buildSnapshot(symbol, Number(DEFAULT_BASES[symbol] ?? 0));
+    });
+    return initial;
+  });
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
   const [analysis, setAnalysis] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -233,12 +227,17 @@ function App() {
     const refresh = async () => {
       try {
         const live = await fetchLiveMarketDataFromTradingView();
-        if (mounted) {
-          setMarketData(live);
-          setLastUpdated(Date.now());
-        }
+        if (!mounted) return;
+        setMarketData(live);
+        setLastUpdated(Date.now());
       } catch {
-        if (mounted) setMarketData(generateMarketData());
+        if (mounted) {
+          const fallback = {};
+          SYMBOLS.forEach((symbol) => {
+            fallback[symbol] = buildSnapshot(symbol, Number(DEFAULT_BASES[symbol] ?? 0));
+          });
+          setMarketData(fallback);
+        }
       } finally {
         if (mounted) setLoading(false);
       }
@@ -264,14 +263,10 @@ function App() {
     const wins = signals.filter((signal) => ['win1', 'win2', 'win3'].includes(signal.status)).length;
     const losses = signals.filter((signal) => signal.status === 'loss').length;
     const winRate = total ? (wins / total) * 100 : 0;
-
     return { total, wins, losses, winRate };
   }, [signals]);
 
-  const sparkline = useMemo(
-    () => buildSparkline(marketData[selectedSymbol]?.series ?? []),
-    [marketData, selectedSymbol],
-  );
+  const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
 
   const handleSymbolChange = (symbol) => {
     setSelectedSymbol(symbol);
@@ -308,13 +303,7 @@ function App() {
   };
 
   const resolveSignal = (signalId, outcome) => {
-    setSignals((previous) =>
-      previous.map((signal) =>
-        signal.id === signalId
-          ? { ...signal, status: outcome, updatedAt: Date.now() }
-          : signal,
-      ),
-    );
+    setSignals((previous) => previous.map((signal) => (signal.id === signalId ? { ...signal, status: outcome, updatedAt: Date.now() } : signal)));
   };
 
   const handleAnalyze = async () => {
@@ -351,6 +340,7 @@ function App() {
         timeframe,
         confidence: Number(trade.confidence ?? 80),
         lotSize: Number(trade.lotSize ?? 0.01),
+        entry: Number(trade.entry ?? current?.price ?? 0),
         stopLoss: Number(trade.stopLoss ?? 0),
         tp1: Number(trade.tp1 ?? 0),
         tp2: Number(trade.tp2 ?? 0),
@@ -385,11 +375,7 @@ function App() {
       </header>
 
       <nav className="nav-tabs" aria-label="قائمة التنقل">
-        <button
-          type="button"
-          className={activeTab === 'overview' ? 'nav-tab active' : 'nav-tab'}
-          onClick={() => setActiveTab('overview')}
-        >
+        <button type="button" className={activeTab === 'overview' ? 'nav-tab active' : 'nav-tab'} onClick={() => setActiveTab('overview')}>
           الرئيسية / التحليل
         </button>
         <button
@@ -402,11 +388,7 @@ function App() {
         >
           السكالبينغ السريع (1m)
         </button>
-        <button
-          type="button"
-          className={activeTab === 'signals' ? 'nav-tab active' : 'nav-tab'}
-          onClick={() => setActiveTab('signals')}
-        >
+        <button type="button" className={activeTab === 'signals' ? 'nav-tab active' : 'nav-tab'} onClick={() => setActiveTab('signals')}>
           سجل الإشارات والأداء
         </button>
       </nav>
@@ -476,7 +458,17 @@ function App() {
 
                     <div className="value-block">
                       <span>الحالة</span>
-                      <strong>{signal.status === 'open' ? 'مفتوح' : signal.status === 'loss' ? 'خسارة' : signal.status === 'win1' ? 'ربح 1' : signal.status === 'win2' ? 'ربح 2' : 'ربح 3'}</strong>
+                      <strong>
+                        {signal.status === 'open'
+                          ? 'مفتوح'
+                          : signal.status === 'loss'
+                            ? 'خسارة'
+                            : signal.status === 'win1'
+                              ? 'ربح 1'
+                              : signal.status === 'win2'
+                                ? 'ربح 2'
+                                : 'ربح 3'}
+                      </strong>
                       <div className="trade-actions" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' }}>
                         {['win1', 'win2', 'win3', 'loss'].map((state) => {
                           const label = state === 'loss' ? 'خسارة' : `ربح ${state.replace('win', '')}`;
