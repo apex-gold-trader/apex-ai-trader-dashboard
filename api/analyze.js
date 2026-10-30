@@ -16,8 +16,13 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    // مفتاح API مباشر وصريح لضمان عدم حدوث أي خطأ في Vercel
-    const apiKey = 'AQ.Ab8RN6K7La1ZG5e82XqTt4pmx9cvH0OGn1t4F-cutIx4qi7wnQ';
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        error: 'Gemini API key is missing. Set GEMINI_API_KEY in the project environment.',
+      });
+    }
 
     const prompt = `
       أنت محلل فني احترافي للأسواق المالية.
@@ -75,18 +80,18 @@ export default async function handler(req, res) {
     }
 
     const responseData = await response.json();
-    const rawText = responseData?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-    const cleaned = rawText.replace(/```json|```/g, '').trim();
+    const rawText = responseData?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') || '{}';
+    const cleaned = rawText.replace(/```json|```/gi, '').trim();
 
     if (!cleaned) {
-      throw new Error('empty');
+      throw new Error('Empty Gemini response');
     }
 
     let parsed;
     try {
       parsed = JSON.parse(cleaned);
     } catch {
-      throw new Error('malformed');
+      throw new Error('Malformed Gemini response');
     }
 
     const trade = {
@@ -108,14 +113,16 @@ export default async function handler(req, res) {
     };
 
     return res.status(200).json({ success: true, trade });
-  }اضغط(error) {
+  } catch (error) {
     return res.status(200).json({
       success: false,
-      error: 'Analysis unavailable',
+      error: error?.message || 'Analysis unavailable',
     });
   }
 }
 
 function clampNumber(value, min, max) {
-  return Math.min(Math.max(Number(value || min), min), max);
+  const numeric = Number(value ?? min);
+  if (!Number.isFinite(numeric)) return min;
+  return Math.min(Math.max(numeric, min), max);
 }
