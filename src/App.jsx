@@ -279,8 +279,8 @@ function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
   const confidence = clamp(Math.round(70 + (Math.abs(rsi - 50) * 0.7) + (direction === 'BUY' ? 8 : -8)), 68, 96);
 
   const reasons = {
-    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}).`,
-    SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}).`,
+    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}), ما يعزز شراء الأصول مع إدارة مخاطر دقيقة.`,
+    SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}), ما يدعم البيع مع تحكم في وقف الخسارة.`,
   };
 
   return {
@@ -413,10 +413,7 @@ function App() {
     }
   }, [signals]);
 
-  const sparkline = useMemo(
-    () => buildSparkline(marketData[selectedSymbol]?.series ?? []),
-    [marketData, selectedSymbol],
-  );
+  const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
 
   const handleSymbolChange = (symbol) => {
     setSelectedSymbol(symbol);
@@ -589,7 +586,7 @@ function App() {
                       <strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong>
                     </div>
                     <div className="value-block">
-                      <span>ال��هداف</span>
+                      <span>الأهداف</span>
                       <strong>
                         {formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}
                       </strong>
