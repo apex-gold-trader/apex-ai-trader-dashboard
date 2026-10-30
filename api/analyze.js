@@ -16,7 +16,19 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    const apiKey = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6LFwqmxfTfLs3lyDJd3_NU5IMw1FdJx93GEszMi69uUaQ';
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY is missing');
+    }
+
+    const isSessionToken = /^AQ\./.test(apiKey);
+    const baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+    const requestUrl = isSessionToken ? baseUrl : `${baseUrl}?key=${encodeURIComponent(apiKey)}`;
+
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(isSessionToken ? { Authorization: `Bearer ${apiKey}` } : {}),
+    };
 
     const prompt = `
       أنت محلل فني احترافي للأسواق المالية.
@@ -54,9 +66,9 @@ export default async function handler(req, res) {
       }
     `;
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    const response = await fetch(requestUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
@@ -66,43 +78,115 @@ export default async function handler(req, res) {
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Gemini API responded with status ${response.status}`);
+    const responseText = await response.text();
+    let data = {};
+
+    try {
+      data = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      data = {};
     }
 
-    const data = await response.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-    const cleaned = rawText.replace(/```json|```/g, '').trim();
+    if (!response.ok) {
+      const message = data?.error?.message || responseText || `Gemini API responded with status ${response.status}`;
+      throw new Error(message);
+    }
 
-    const parsed = JSON.parse(cleaned);
+    const rawText = extractGeminiText(data) || '{}';
+    const cleaned = rawText
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
+      .trim();
 
-    const trade = {
-      direction: parsed.direction || (rsi > 55 ? 'SELL' : 'BUY'),
-      entry: Number(parsed.entry ?? price),
-      stopLoss: Number(parsed.stopLoss ?? (parsed.direction === 'BUY' ? price - 1.8 : price + 1.8)),
-      tp1: Number(parsed.tp1 ?? (parsed.direction === 'BUY' ? price + 3.2 : price - 3.2)),
-      tp2: Number(parsed.tp2 ?? (parsed.direction === 'BUY' ? price + 5.8 : price - 5.8)),
-      tp3: Number(parsed.tp3 ?? (parsed.direction === 'BUY' ? price + 8.2 : price - 8.2)),
-      lotSize: Number(parsed.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25)),
-      breakEven: Number(parsed.breakEven ?? price),
-      trailingStop: Number(parsed.trailingStop ?? price),
-      confidence: clampNumber(parsed.confidence ?? 80, 68, 98),
-      reason: parsed.reason || 'تحليل ذكي وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.',
-      timeframe,
-      strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
-      mode,
+    let parsed = {};
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (match) {
+        try {
+          parsed = JSON.parse(match[0]);
+        } catch {
+          parsed = {};
+        }
+      }
+    }
+
+    const trade = normalizeTrade({
+      parsed,
       symbol,
-    };
+      timeframe,
+      mode,
+      price,
+      rsi,
+    });
 
-    return res.status(200).json({ success: true, trade });
+    return res.status(200).json({
+      success: true,
+      ...trade,
+      trade,
+    });
   } catch (error) {
     const fallback = buildFallbackTrade(req.body || {});
-    return res.status(200).json({ success: false, error: error.message, trade: fallback });
+    return res.status(200).json({
+      success: false,
+      error: error?.message || 'Gemini analysis failed',
+      ...fallback,
+      trade: fallback,
+    });
   }
 }
 
+function extractGeminiText(data) {
+  if (!data || typeof data !== 'object') return '';
+
+  const candidates = data?.candidates || [];
+  for (const candidate of candidates) {
+    const parts = candidate?.content?.parts || [];
+    for (const part of parts) {
+      if (typeof part?.text === 'string' && part.text.trim()) {
+        return part.text;
+      }
+    }
+  }
+
+  return data?.text || '';
+}
+
+function normalizeTrade({ parsed = {}, symbol, timeframe, mode, price, rsi }) {
+  const direction = String(parsed.direction || (rsi > 55 ? 'SELL' : 'BUY')).toUpperCase();
+  const entry = Number(parsed.entry ?? price);
+  const stopLoss = Number(parsed.stopLoss ?? (direction === 'BUY' ? entry - 1.8 : entry + 1.8));
+  const tp1 = Number(parsed.tp1 ?? (direction === 'BUY' ? entry + 3.2 : entry - 3.2));
+  const tp2 = Number(parsed.tp2 ?? (direction === 'BUY' ? entry + 5.8 : entry - 5.8));
+  const tp3 = Number(parsed.tp3 ?? (direction === 'BUY' ? entry + 8.2 : entry - 8.2));
+  const lotSize = Number(parsed.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25));
+  const breakEven = Number(parsed.breakEven ?? (direction === 'BUY' ? entry + 0.9 : entry - 0.9));
+  const trailingStop = Number(parsed.trailingStop ?? (direction === 'BUY' ? entry + 1.2 : entry - 1.2));
+
+  return {
+    direction,
+    entry: Number.isFinite(entry) ? entry : price || 0,
+    stopLoss: Number.isFinite(stopLoss) ? stopLoss : 0,
+    tp1: Number.isFinite(tp1) ? tp1 : 0,
+    tp2: Number.isFinite(tp2) ? tp2 : 0,
+    tp3: Number.isFinite(tp3) ? tp3 : 0,
+    lotSize: Number.isFinite(lotSize) ? lotSize : 0,
+    breakEven: Number.isFinite(breakEven) ? breakEven : 0,
+    trailingStop: Number.isFinite(trailingStop) ? trailingStop : 0,
+    confidence: clampNumber(parsed.confidence ?? 80, 68, 98),
+    reason: String(parsed.reason || 'تحليل ذكي وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.'),
+    timeframe,
+    strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
+    mode,
+    symbol,
+  };
+}
+
 function clampNumber(value, min, max) {
-  return Math.min(Math.max(Number(value || min), min), max);
+  const num = Number(value);
+  if (!Number.isFinite(num)) return min;
+  return Math.min(Math.max(num, min), max);
 }
 
 function buildFallbackTrade(payload = {}) {
@@ -111,7 +195,7 @@ function buildFallbackTrade(payload = {}) {
   const mode = payload.mode || 'standard';
   const current = payload.current || {};
   const price = Number(current.price ?? 2346.42);
-  const direction = current?.indicators?.rsi > 55 ? 'SELL' : 'BUY';
+  const direction = Number(current?.indicators?.rsi ?? 50) > 55 ? 'SELL' : 'BUY';
   const stopDistance = mode === 'scalp' ? 1.8 : 4.5;
   const entry = price;
 
