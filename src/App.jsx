@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 
-const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
 const STORAGE_KEY = 'apex-ai-trader-signals-v1';
+const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h'];
+const SYMBOLS = ['XAUUSD', 'BTCUSD', 'EURUSD', 'ETHUSD', 'NAS100'];
 
 const marketMeta = {
   XAUUSD: { label: 'الذهب', unit: 'XAUUSD', color: '#f6c453', description: 'سبوت الذهب' },
@@ -22,24 +23,24 @@ const symbolMap = {
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 const formatPrice = (value, symbol) => {
-  if (!Number.isFinite(value)) return '—';
-  if (symbol === 'XAUUSD') return `$${value.toFixed(2)}`;
-  if (symbol === 'EURUSD') return value.toFixed(5);
-  if (symbol === 'NAS100') return value.toFixed(2);
-  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return `$${value.toFixed(2)}`;
-  return value.toFixed(4);
+  if (!Number.isFinite(Number(value))) return '—';
+  const num = Number(value);
+  if (symbol === 'XAUUSD') return `$${num.toFixed(2)}`;
+  if (symbol === 'EURUSD') return num.toFixed(5);
+  if (symbol === 'NAS100') return num.toFixed(2);
+  if (symbol === 'BTCUSD' || symbol === 'ETHUSD') return `$${num.toFixed(2)}`;
+  return num.toFixed(4);
 };
 
-function buildTrendSeries(base, drift, volatility, length = 40) {
+function buildTrendSeries(base, drift, volatility, length = 42) {
   const series = [];
   let current = base;
 
   for (let i = 0; i < length; i += 1) {
     const wave = Math.sin((i / Math.max(length, 1)) * 10) * volatility;
     const noise = (Math.random() - 0.5) * volatility * 1.5;
-    const step = drift + wave + noise;
-    current = Math.max(current + step, base * 0.65);
-    series.push(Number(current.toFixed(4)));
+    current = Math.max(current + drift + wave + noise, base * 0.7);
+    series.push(Number(current.toFixed(6)));
   }
 
   return series;
@@ -47,18 +48,28 @@ function buildTrendSeries(base, drift, volatility, length = 40) {
 
 function average(values) {
   if (!values.length) return 0;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.reduce((sum, item) => sum + item, 0) / values.length;
+}
+
+function getEma(series, period) {
+  if (!series.length) return 0;
+  const multiplier = 2 / (period + 1);
+  let ema = series[0];
+  for (let i = 1; i < series.length; i += 1) {
+    ema = (series[i] - ema) * multiplier + ema;
+  }
+  return ema;
 }
 
 function getRsi(series) {
-  if (series.length < 14) return 50;
+  if (series.length < 15) return 50;
   let gains = 0;
   let losses = 0;
 
   for (let i = 1; i < 15; i += 1) {
-    const diff = series[i] - series[i - 1];
-    if (diff >= 0) gains += diff;
-    else losses += Math.abs(diff);
+    const difference = series[i] - series[i - 1];
+    if (difference >= 0) gains += difference;
+    else losses += Math.abs(difference);
   }
 
   const avgGain = gains / 14;
@@ -68,22 +79,10 @@ function getRsi(series) {
   return 100 - 100 / (1 + rs);
 }
 
-function getEma(series, period) {
-  if (!series.length) return 0;
-  const multiplier = 2 / (period + 1);
-  let ema = series[0];
-
-  for (let i = 1; i < series.length; i += 1) {
-    ema = (series[i] - ema) * multiplier + ema;
-  }
-
-  return ema;
-}
-
 function getMacd(series) {
   const fast = getEma(series, 12);
   const slow = getEma(series, 26);
-  return { macd: fast - slow, signal: (fast - slow) * 0.2 };
+  return fast - slow;
 }
 
 function getBollinger(series) {
@@ -91,7 +90,7 @@ function getBollinger(series) {
   const mid = average(window);
   const variance = average(window.map((point) => (point - mid) ** 2));
   const std = Math.sqrt(variance);
-  return { upper: mid + std * 2, lower: mid - std * 2, mid };
+  return { upper: mid + std * 2, lower: mid - std * 2 };
 }
 
 function generateMarketData() {
@@ -103,38 +102,38 @@ function generateMarketData() {
     NAS100: 19036.2,
   };
 
-  const symbolStates = {
-    XAUUSD: { drift: 1.8, volatility: 4.4 },
-    BTCUSD: { drift: 160, volatility: 140 },
-    EURUSD: { drift: 0.00036, volatility: 0.0012 },
-    ETHUSD: { drift: 7.2, volatility: 18 },
-    NAS100: { drift: 8.5, volatility: 30 },
+  const stateMap = {
+    XAUUSD: { drift: 1.8, volatility: 4.5 },
+    BTCUSD: { drift: 150, volatility: 150 },
+    EURUSD: { drift: 0.00038, volatility: 0.0012 },
+    ETHUSD: { drift: 8, volatility: 20 },
+    NAS100: { drift: 10, volatility: 32 },
   };
 
   const result = {};
 
   Object.entries(baseData).forEach(([symbol, base]) => {
-    const state = symbolStates[symbol];
-    const series = buildTrendSeries(base, state.drift, state.volatility, 45);
+    const state = stateMap[symbol];
+    const series = buildTrendSeries(base, state.drift, state.volatility, 42);
     const last = series[series.length - 1];
+    const previous = series[series.length - 2] || last;
     const rsi = getRsi(series);
     const emaShort = getEma(series, 9);
     const emaLong = getEma(series, 21);
     const macd = getMacd(series);
-    const bb = getBollinger(series);
+    const bollinger = getBollinger(series);
 
     result[symbol] = {
       price: Number(last.toFixed(symbol === 'EURUSD' ? 5 : 2)),
-      change: Number(((last - series[series.length - 2]) * 100 / Math.max(series[series.length - 2], 0.0001)).toFixed(3)),
+      change: Number((((last - previous) / Math.max(previous, 0.0001)) * 100).toFixed(3)),
       series,
       indicators: {
         rsi,
         emaShort,
         emaLong,
-        macd: macd.macd,
-        signal: macd.signal,
-        bollingerUpper: bb.upper,
-        bollingerLower: bb.lower,
+        macd,
+        bollingerUpper: bollinger.upper,
+        bollingerLower: bollinger.lower,
       },
       updatedAt: Date.now(),
     };
@@ -156,10 +155,9 @@ async function fetchTradingViewQuote(symbol) {
 
     if (!response.ok) return null;
 
-    const data = await response.json();
-    const item = data?.data?.find((row) => row?.s === plot.ticker) || data?.data?.[0];
+    const payload = await response.json();
+    const item = payload?.data?.find((row) => row?.s === plot.ticker) || payload?.data?.[0];
     const price = Number(item?.c ?? item?.lp ?? item?.p ?? item?.last ?? item?.last_price ?? 0);
-
     return Number.isFinite(price) && price > 0 ? price : null;
   } catch {
     return null;
@@ -167,13 +165,9 @@ async function fetchTradingViewQuote(symbol) {
 }
 
 async function fetchLiveMarketDataFromTradingView() {
-  const fallback = generateMarketData();
-
+  const base = generateMarketData();
   const results = await Promise.allSettled(
-    Object.keys(marketMeta).map(async (symbol) => {
-      const quote = await fetchTradingViewQuote(symbol);
-      return { symbol, quote };
-    }),
+    SYMBOLS.map(async (symbol) => ({ symbol, quote: await fetchTradingViewQuote(symbol) })),
   );
 
   const next = {};
@@ -182,16 +176,16 @@ async function fetchLiveMarketDataFromTradingView() {
     const { symbol, quote } = result.value;
     if (!quote) return;
 
-    const base = fallback[symbol];
+    const current = base[symbol];
     next[symbol] = {
-      ...base,
+      ...current,
       price: Number(quote),
       updatedAt: Date.now(),
     };
   });
 
-  Object.keys(fallback).forEach((symbol) => {
-    if (!next[symbol]) next[symbol] = fallback[symbol];
+  SYMBOLS.forEach((symbol) => {
+    if (!next[symbol]) next[symbol] = base[symbol];
   });
 
   return next;
@@ -201,105 +195,17 @@ function buildSparkline(series) {
   if (!series || series.length < 2) return '';
   const max = Math.max(...series);
   const min = Math.min(...series);
-  const height = 64;
-  const width = 250;
+  const width = 240;
+  const height = 50;
   const range = max - min || 1;
 
-  const points = series
+  return series
     .map((point, index) => {
       const x = (index / (series.length - 1)) * width;
       const y = height - ((point - min) / range) * height;
       return `${x},${y}`;
     })
     .join(' ');
-
-  return { points, width, height };
-}
-
-function getScalpStopDistance(symbol) {
-  const stopMap = {
-    XAUUSD: 1.8,
-    BTCUSD: 2.4,
-    ETHUSD: 2.1,
-    EURUSD: 0.0022,
-    NAS100: 2.6,
-  };
-
-  return clamp(stopMap[symbol] ?? 1.5, 1.2, 3);
-}
-
-function analyzeTrade({ symbol, timeframe, marketData, mode = 'standard' }) {
-  const current = marketData[symbol];
-  if (!current) return null;
-
-  const entry = Number(current.price);
-  const indicatorSet = current.indicators || {};
-  const rsi = Number(indicatorSet.rsi ?? 50);
-  const emaShort = Number(indicatorSet.emaShort ?? entry);
-  const emaLong = Number(indicatorSet.emaLong ?? entry);
-  const macd = Number(indicatorSet.macd ?? 0);
-  const bollingerUpper = Number(indicatorSet.bollingerUpper ?? entry);
-  const bollingerLower = Number(indicatorSet.bollingerLower ?? entry);
-
-  const bullishCondition = rsi < 45 && emaShort > emaLong && macd > 0;
-  const bearishCondition = rsi > 55 && emaShort < emaLong && macd < 0;
-  const direction =
-    bullishCondition || (rsi < 40 && entry < bollingerLower)
-      ? 'BUY'
-      : bearishCondition || (rsi > 60 && entry > bollingerUpper)
-        ? 'SELL'
-        : 'BUY';
-
-  const volatilityBuffer = {
-    XAUUSD: 0.008,
-    BTCUSD: 0.012,
-    EURUSD: 0.004,
-    ETHUSD: 0.015,
-    NAS100: 0.01,
-  }[symbol] ?? 0.01;
-
-  const isScalp = mode === 'scalp';
-  const stopDistance = isScalp ? getScalpStopDistance(symbol) : entry * volatilityBuffer;
-  const tpDistance = isScalp ? stopDistance * (1.8 + (timeframe === '1m' ? 0.75 : 0.25)) : stopDistance * 1.8;
-
-  const stopLoss = direction === 'BUY' ? entry - stopDistance : entry + stopDistance;
-  const tp1 = direction === 'BUY' ? entry + tpDistance * 0.75 : entry - tpDistance * 0.75;
-  const tp2 = direction === 'BUY' ? entry + tpDistance * 1.35 : entry - tpDistance * 1.35;
-  const tp3 = direction === 'BUY' ? entry + tpDistance * 2 : entry - tpDistance * 2;
-
-  const riskPerTrade = 0.02;
-  const accountSize = 10000;
-  const riskAmount = accountSize * riskPerTrade;
-  const lotSize = isScalp
-    ? Math.max(0.08, Number((riskAmount / Math.max(stopDistance * 100000, 1)).toFixed(2)))
-    : Math.max(0.01, Number((riskAmount / Math.max(stopDistance * 100000, 1)).toFixed(2)));
-
-  const breakEven = direction === 'BUY' ? entry + stopDistance * 0.35 : entry - stopDistance * 0.35;
-  const trailingStop = direction === 'BUY' ? entry + stopDistance * 0.5 : entry - stopDistance * 0.5;
-  const confidence = clamp(Math.round(70 + (Math.abs(rsi - 50) * 0.7) + (direction === 'BUY' ? 8 : -8)), 68, 96);
-
-  const reasons = {
-    BUY: `هيكل ${timeframe} يدعم استمرار الاتجاه الصاعد. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أعلى من EMA الطويلة (${emaLong.toFixed(2)}). السعر الحالي تم جلبه مباشرة من السوق الحقيقي، ويستهدف التداول شراءً عند دعم مناورات الزخم مع إدراج وقف خسارة محكم في منطقة الإيقاف الآمن.`,
-    SELL: `هيكل ${timeframe} يوضح توزيعاً واضحاً. مؤشر RSI عند ${rsi.toFixed(1)}، وEMA القصيرة (${emaShort.toFixed(2)}) أقل من EMA الطويلة (${emaLong.toFixed(2)}). السعر الحالي تم جلبه مباشرة من السوق الحقيقي، ويفرض هذا السيناريو دخولاً للبيع مع توقف خسارة آمن بعيداً عن مناطق التلاعب وسلوك التجميع القريب.`,
-  };
-
-  return {
-    direction,
-    entry,
-    tp1,
-    tp2,
-    tp3,
-    stopLoss,
-    lotSize,
-    breakEven,
-    trailingStop,
-    reason: reasons[direction],
-    confidence,
-    timeframe,
-    strategy: isScalp ? 'سكالبينغ سريع / اختراق قصير المدى' : 'استمرارية الاتجاه / كسر صاعد',
-    snapshotTime: Date.now(),
-    mode: isScalp ? 'scalp' : 'standard',
-  };
 }
 
 function App() {
@@ -307,10 +213,10 @@ function App() {
   const [marketData, setMarketData] = useState(generateMarketData());
   const [selectedSymbol, setSelectedSymbol] = useState('XAUUSD');
   const [analysis, setAnalysis] = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(Date.now());
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('overview');
   const [loadingAi, setLoadingAi] = useState(false);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [lastUpdated, setLastUpdated] = useState(Date.now());
   const [signals, setSignals] = useState(() => {
     if (typeof window === 'undefined') return [];
     try {
@@ -327,12 +233,12 @@ function App() {
     const refresh = async () => {
       try {
         const live = await fetchLiveMarketDataFromTradingView();
-        if (!mounted) return;
-        setMarketData(live);
-        setLastUpdated(Date.now());
+        if (mounted) {
+          setMarketData(live);
+          setLastUpdated(Date.now());
+        }
       } catch {
-        if (!mounted) return;
-        setMarketData(generateMarketData());
+        if (mounted) setMarketData(generateMarketData());
       } finally {
         if (mounted) setLoading(false);
       }
@@ -353,7 +259,19 @@ function App() {
     }
   }, [signals]);
 
-  const sparkline = useMemo(() => buildSparkline(marketData[selectedSymbol]?.series ?? []), [marketData, selectedSymbol]);
+  const stats = useMemo(() => {
+    const total = signals.length;
+    const wins = signals.filter((signal) => ['win1', 'win2', 'win3'].includes(signal.status)).length;
+    const losses = signals.filter((signal) => signal.status === 'loss').length;
+    const winRate = total ? (wins / total) * 100 : 0;
+
+    return { total, wins, losses, winRate };
+  }, [signals]);
+
+  const sparkline = useMemo(
+    () => buildSparkline(marketData[selectedSymbol]?.series ?? []),
+    [marketData, selectedSymbol],
+  );
 
   const handleSymbolChange = (symbol) => {
     setSelectedSymbol(symbol);
@@ -369,26 +287,38 @@ function App() {
     const record = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       symbol: selectedSymbol,
-      label: marketMeta[selectedSymbol].label,
-      direction: trade.direction,
-      entry: trade.entry,
-      stopLoss: trade.stopLoss,
-      tp1: trade.tp1,
-      tp2: trade.tp2,
-      tp3: trade.tp3,
-      confidence: trade.confidence,
-      timeframe: trade.timeframe,
-      strategy: trade.strategy,
+      label: marketMeta[selectedSymbol]?.label ?? selectedSymbol,
+      direction: trade.direction || 'BUY',
+      entry: Number(trade.entry ?? 0),
+      stopLoss: Number(trade.stopLoss ?? 0),
+      tp1: Number(trade.tp1 ?? 0),
+      tp2: Number(trade.tp2 ?? 0),
+      tp3: Number(trade.tp3 ?? 0),
+      lotSize: Number(trade.lotSize ?? 0.01),
+      confidence: Number(trade.confidence ?? 0),
+      timeframe: trade.timeframe || timeframe,
+      strategy: trade.strategy || (activeTab === 'scalp' ? 'سكالبينغ سريع 1m' : 'تحليل فني متوازن'),
+      mode: trade.mode || (activeTab === 'scalp' ? 'scalp' : 'standard'),
       status: 'open',
-      mode: trade.mode,
       createdAt: new Date().toLocaleString('ar-SA'),
+      updatedAt: Date.now(),
     };
 
-    setSignals((previous) => [record, ...previous].slice(0, 14));
+    setSignals((previous) => [record, ...previous].slice(0, 30));
+  };
+
+  const resolveSignal = (signalId, outcome) => {
+    setSignals((previous) =>
+      previous.map((signal) =>
+        signal.id === signalId
+          ? { ...signal, status: outcome, updatedAt: Date.now() }
+          : signal,
+      ),
+    );
   };
 
   const handleAnalyze = async () => {
-    const mode = activeTab === 'scalp' ? 'scalp' : 'scalp';
+    const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
     const current = marketData[selectedSymbol];
 
     setLoadingAi(true);
@@ -405,21 +335,31 @@ function App() {
         }),
       });
 
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.success) {
         throw new Error(payload.error || 'فشل الاتصال بخادم التحليل.');
       }
 
-      const data = await response.json();
-      const trade = data.trade || analyzeTrade({ symbol: selectedSymbol, timeframe, marketData, mode });
-
-      if (!trade) {
-        throw new Error('لا يوجد تحليل صالح للعرض في الوقت الحالي.');
+      const trade = payload.trade || payload;
+      if (!trade || !Number.isFinite(Number(trade.entry))) {
+        throw new Error('لا يوجد تحليل صالح في الوقت الحالي.');
       }
 
-      setAnalysis(trade);
-      persistSignal(trade);
-      setActiveTab('signals');
+      const normalizedTrade = {
+        ...trade,
+        mode,
+        timeframe,
+        confidence: Number(trade.confidence ?? 80),
+        lotSize: Number(trade.lotSize ?? 0.01),
+        stopLoss: Number(trade.stopLoss ?? 0),
+        tp1: Number(trade.tp1 ?? 0),
+        tp2: Number(trade.tp2 ?? 0),
+        tp3: Number(trade.tp3 ?? 0),
+        breakEven: Number(trade.breakEven ?? 0),
+      };
+
+      setAnalysis(normalizedTrade);
+      persistSignal(normalizedTrade);
     } catch (error) {
       setAnalysis(null);
       console.error(error);
@@ -428,9 +368,8 @@ function App() {
     }
   };
 
-  const totalWins = signals.filter((signal) => signal.direction === 'BUY').length;
-  const totalLosses = signals.filter((signal) => signal.direction === 'SELL').length;
-  const symbols = Object.keys(marketMeta);
+  const isScalpTab = activeTab === 'scalp';
+  const liveCurrent = marketData[selectedSymbol]?.price ?? 0;
 
   return (
     <div className="app-shell" dir="rtl">
@@ -461,7 +400,7 @@ function App() {
             setTimeframe('1m');
           }}
         >
-          السكالبينغ السريع (1m Scalping)
+          السكالبينغ السريع (1m)
         </button>
         <button
           type="button"
@@ -487,20 +426,20 @@ function App() {
 
             <div className="stat-grid">
               <div className="stat-box">
-                <span>إجمالي الإشارات</span>
-                <strong>{signals.length}</strong>
+                <span>إجمالي الصفقات</span>
+                <strong>{stats.total}</strong>
               </div>
               <div className="stat-box">
-                <span>الصفقات الصاعدة</span>
-                <strong className="up">{totalWins}</strong>
+                <span>الصفقات الرابحة</span>
+                <strong className="up">{stats.wins}</strong>
               </div>
               <div className="stat-box">
-                <span>الصفقات الهابطة</span>
-                <strong className="down">{totalLosses}</strong>
+                <span>الصفقات الخاسرة</span>
+                <strong className="down">{stats.losses}</strong>
               </div>
               <div className="stat-box">
-                <span>النوع</span>
-                <strong>{activeTab === 'scalp' ? 'سكالبينغ سريع' : 'قياسي'}</strong>
+                <span>Win Rate %</span>
+                <strong>{stats.winRate.toFixed(1)}%</strong>
               </div>
             </div>
 
@@ -517,23 +456,51 @@ function App() {
                         <strong>{signal.label}</strong>
                       </div>
                     </div>
+
                     <div className="value-block">
                       <span>الدخول</span>
                       <strong>{formatPrice(signal.entry, signal.symbol)}</strong>
                     </div>
+
                     <div className="value-block">
                       <span>وقف الخسارة</span>
                       <strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong>
                     </div>
+
                     <div className="value-block">
                       <span>الأهداف</span>
                       <strong>
                         {formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}
                       </strong>
                     </div>
+
                     <div className="value-block">
-                      <span>الثقة</span>
-                      <strong>{signal.confidence}%</strong>
+                      <span>الحالة</span>
+                      <strong>{signal.status === 'open' ? 'مفتوح' : signal.status === 'loss' ? 'خسارة' : signal.status === 'win1' ? 'ربح 1' : signal.status === 'win2' ? 'ربح 2' : 'ربح 3'}</strong>
+                      <div className="trade-actions" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' }}>
+                        {['win1', 'win2', 'win3', 'loss'].map((state) => {
+                          const label = state === 'loss' ? 'خسارة' : `ربح ${state.replace('win', '')}`;
+                          return (
+                            <button
+                              key={state}
+                              type="button"
+                              className={signal.status === state ? 'outcome-btn active' : 'outcome-btn'}
+                              onClick={() => resolveSignal(signal.id, state)}
+                              style={{
+                                borderRadius: '8px',
+                                padding: '6px 8px',
+                                cursor: 'pointer',
+                                border: '1px solid rgba(255,255,255,0.14)',
+                                background: signal.status === state ? 'rgba(90,228,162,0.12)' : 'rgba(255,255,255,0.02)',
+                                color: state === 'loss' ? '#ff6a78' : '#5ae4a2',
+                                fontSize: '0.7rem',
+                              }}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 ))
@@ -547,13 +514,14 @@ function App() {
         ) : (
           <>
             <section className="market-grid">
-              {symbols.map((symbol) => {
+              {SYMBOLS.map((symbol) => {
                 const item = marketData[symbol];
                 const meta = marketMeta[symbol];
                 const isSelected = symbol === selectedSymbol;
                 const price = item?.price ?? 0;
                 const change = item?.change ?? 0;
                 const positive = change >= 0;
+                const spark = buildSparkline(item?.series ?? []);
 
                 return (
                   <button
@@ -561,25 +529,30 @@ function App() {
                     type="button"
                     className={isSelected ? 'market-card selected' : 'market-card'}
                     onClick={() => handleSymbolChange(symbol)}
-                    style={{ borderColor: isSelected ? meta.color : 'transparent' }}
+                    style={{ borderColor: isSelected ? meta.color : 'rgba(255,255,255,0.08)' }}
                   >
-                    <div className="market-card-top">
-                      <span className="dot" style={{ background: meta.color }} />
+                    <div className="market-header">
+                      <span className="legend" style={{ color: meta.color, background: meta.color }} />
                       <strong>{meta.label}</strong>
                     </div>
-                    <div className="price-row">
-                      <span>{meta.unit}</span>
+
+                    <div className="market-price-row">
+                      <span className="market-label">{meta.unit}</span>
                       <strong>{formatPrice(price, symbol)}</strong>
                     </div>
-                    <div className={`change ${positive ? 'up' : 'down'}`}>
+
+                    <div className={positive ? 'up market-subtitle' : 'down market-subtitle'}>
                       {positive ? '+' : ''}{change.toFixed(2)}%
                     </div>
-                    <svg viewBox="0 0 250 64" className="sparkline" preserveAspectRatio="none">
+
+                    <svg viewBox="0 0 240 50" className="sparkline" preserveAspectRatio="none" style={{ height: '52px', minHeight: '52px' }}>
                       <polyline
-                        points={sparkline?.points || ''}
+                        points={spark}
                         fill="none"
                         stroke={meta.color}
                         strokeWidth="2"
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
                       />
                     </svg>
                   </button>
@@ -587,60 +560,77 @@ function App() {
               })}
             </section>
 
-            <section className="main-panel">
-              <aside className="analysis-panel" style={{ width: '100%' }}>
-                <div className="analysis-box">
-                  <div className="panel-header compact" style={{ alignItems: 'center' }}>
-                    <div>
-                      <p className="eyebrow">التحليل</p>
-                      <h3>{marketMeta[selectedSymbol]?.label}</h3>
-                    </div>
-                    <div className="timeframe-group">
-                      {TIMEFRAMES.map((option) => (
-                        <button
-                          key={option}
-                          type="button"
-                          className={timeframe === option ? 'tf-btn active' : 'tf-btn'}
-                          onClick={() => handleTimeframeChange(option)}
-                        >
-                          {option}
-                        </button>
-                      ))}
-                    </div>
+            <section className="analysis-panel" style={{ width: '100%' }}>
+              <div className="panel-header" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <p className="eyebrow">التحليل</p>
+                  <h3>{marketMeta[selectedSymbol]?.label}</h3>
+                </div>
+                <div className="timeframe-picker">
+                  {TIMEFRAMES.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={timeframe === option ? 'active' : ''}
+                      onClick={() => handleTimeframeChange(option)}
+                      style={{
+                        padding: '8px 10px',
+                        borderRadius: '10px',
+                        border: '1px solid rgba(255,255,255,0.14)',
+                        background: timeframe === option ? 'rgba(116,171,255,0.18)' : 'rgba(255,255,255,0.02)',
+                        color: '#edf6ff',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="analyze-btn"
+                onClick={handleAnalyze}
+                disabled={loadingAi}
+                style={{ width: '100%', margin: '8px 0 0' }}
+              >
+                {loadingAi ? 'جارٍ التحليل...' : isScalpTab ? 'حلل الآن (سكالبينغ 1m)' : 'حلل الآن'}
+              </button>
+
+              {analysis ? (
+                <div className="trade-card" style={{ borderRadius: '18px', border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(10,18,28,0.9)', padding: '18px' }}>
+                  <div className="trade-head" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
+                    <span className={`badge ${analysis.direction === 'BUY' ? 'buy' : 'sell'}`}>
+                      {analysis.direction === 'BUY' ? 'شراء' : 'بيع'}
+                    </span>
+                    <strong className="confidence">{analysis.confidence ?? 0}%</strong>
                   </div>
 
-                  <button type="button" className="analyze-btn" onClick={handleAnalyze} disabled={loadingAi} style={{ width: '100%', margin: '16px 0' }}>
-                    {loadingAi ? 'جارٍ التحليل...' : 'حلل الآن (سكالبينغ)'}
-                  </button>
+                  <div className="trade-grid">
+                    <div className="trade-item"><span>الدخول</span><strong>{formatPrice(analysis.entry, selectedSymbol)}</strong></div>
+                    <div className="trade-item"><span>وقف الخسارة</span><strong>{formatPrice(analysis.stopLoss, selectedSymbol)}</strong></div>
+                    <div className="trade-item"><span>TP1</span><strong>{formatPrice(analysis.tp1, selectedSymbol)}</strong></div>
+                    <div className="trade-item"><span>TP2</span><strong>{formatPrice(analysis.tp2, selectedSymbol)}</strong></div>
+                    <div className="trade-item"><span>TP3</span><strong>{formatPrice(analysis.tp3, selectedSymbol)}</strong></div>
+                    <div className="trade-item"><span>Breakeven</span><strong>{formatPrice(analysis.breakEven, selectedSymbol)}</strong></div>
+                    <div className="trade-item"><span>Lot</span><strong>{Number(analysis.lotSize ?? 0).toFixed(2)}</strong></div>
+                    <div className="trade-item"><span>الإطار</span><strong>{analysis.timeframe || timeframe}</strong></div>
+                  </div>
 
-                  {analysis ? (
-                    <div className="trade-card">
-                      <div className="trade-header">
-                        <span className={`badge ${analysis.direction === 'BUY' ? 'buy' : 'sell'}`}>
-                          {analysis.direction === 'BUY' ? 'شراء' : 'بيع'}
-                        </span>
-                        <strong>{analysis.confidence}%</strong>
-                      </div>
+                  <p className="reason-box" style={{ marginTop: '14px', opacity: 0.82 }}>
+                    {analysis.reason || 'تحليل فني يستند إلى السوق اللحظي، الزخم، وكسر السيولة مع إدارة مخاطرة دقيقة.'}
+                  </p>
 
-                      <div className="metric-list">
-                        <div><span>الدخول</span><strong>{formatPrice(analysis.entry, selectedSymbol)}</strong></div>
-                        <div><span>وقف الخسارة</span><strong>{formatPrice(analysis.stopLoss, selectedSymbol)}</strong></div>
-                        <div><span>TP1</span><strong>{formatPrice(analysis.tp1, selectedSymbol)}</strong></div>
-                        <div><span>TP2</span><strong>{formatPrice(analysis.tp2, selectedSymbol)}</strong></div>
-                        <div><span>TP3</span><strong>{formatPrice(analysis.tp3, selectedSymbol)}</strong></div>
-                        <div><span>Lot</span><strong>{analysis.lotSize}</strong></div>
-                        <div><span>Breakeven</span><strong>{formatPrice(analysis.breakEven, selectedSymbol)}</strong></div>
-                      </div>
-
-                      <p className="reason-box">{analysis.reason}</p>
-                    </div>
-                  ) : (
-                    <div className="empty-card">
-                      <p>اختر زوج التداول ثم اضغط على زر "حلل الآن (سكالبينغ)" للحصول على إشارة جاهزة.</p>
-                    </div>
-                  )}
+                  <p className="market-subtitle" style={{ marginTop: '12px', opacity: 0.7 }}>
+                    السعر الحي: {formatPrice(liveCurrent, selectedSymbol)} • المصدر: Market Live Feed
+                  </p>
                 </div>
-              </aside>
+              ) : (
+                <div className="empty-state">
+                  <p>اختر أصل التداول ثم اضغط على زر “حلل الآن” للحصول على توصية جاهزة.</p>
+                </div>
+              )}
             </section>
           </>
         )}
