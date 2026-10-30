@@ -16,12 +16,16 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    const apiKey = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6L8cpGu6IIBo3MtbBfkfpQXFRHSeeBeKGmg_kXcui1M9g';
+    const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (!apiKey) {
+      return res.status(401).json({
+        success: false,
+        error: 'Missing GEMINI_API_KEY. Add the key in Vercel → Project → Settings → Environment Variables.',
+      });
+    }
 
     const prompt = `
-      أنت محلل فني احترافي للأسواق المالية.
-      الأصل: ${symbol}
-      الإطار الزمني: ${timeframe}
+      أنت محلل فني احترافي للأسواق المالية. تحليل الأصل ${symbol} على الإطار ${timeframe}.
       السعر الحالي: ${price}
       RSI: ${rsi}
       EMA قصيرة: ${emaShort}
@@ -30,15 +34,15 @@ export default async function handler(req, res) {
       نوع التحليل: ${mode}
 
       المطلوب:
-      1) تحديد الاتجاه BUY أو SELL.
+      1) تحديد الاتجاه: BUY أو SELL.
       2) سعر الدخول، وقف الخسارة، TP1، TP2، TP3.
       3) حجم اللوت.
-      4) نقطة Breakeven.
-      5) confidence من 0 إلى 100.
-      6) شرح بالعربية.
-      7) تجنب فخاخ السيولة، واحتفظ بوقف الخسارة في مناطق أمان خلف الدوامات الوهمية.
+      4) نقطة التعادل Breakeven.
+      5) trust/confidence من 0 إلى 100.
+      6) شرح موجز بالعربية.
+      7) تجنب فخاخ السيولة (Stop Hunt) ووضع الوقف خلف مناطق الدعم/المقاومة الحقيقية.
 
-      أعد JSON فقط:
+      أعد JSON فقط بدون Markdown:
       {
         "direction": "BUY|SELL",
         "entry": 1234.56,
@@ -50,7 +54,7 @@ export default async function handler(req, res) {
         "breakEven": 1235.2,
         "trailingStop": 1236.1,
         "confidence": 82,
-        "reason": "شرح بالعربية"
+        "reason": "نص بالعربية"
       }
     `;
 
@@ -66,15 +70,31 @@ export default async function handler(req, res) {
       }),
     });
 
+    if (response.status === 401 || response.status === 403) {
+      return res.status(401).json({
+        success: false,
+        error: 'Gemini API key is invalid, expired, or not authorized for this project.',
+      });
+    }
+
     if (!response.ok) {
       throw new Error(`Gemini API responded with status ${response.status}`);
     }
 
-    const data = await response.json();
-    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const responseData = await response.json();
+    const rawText = responseData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const cleaned = rawText.replace(/```json|```/g, '').trim();
 
-    const parsed = JSON.parse(cleaned);
+    if (!cleaned) {
+      throw new Error('Gemini returned an empty response.');
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      throw new Error('Gemini returned malformed JSON.');
+    }
 
     const trade = {
       direction: parsed.direction || (rsi > 55 ? 'SELL' : 'BUY'),
@@ -86,7 +106,7 @@ export default async function handler(req, res) {
       lotSize: Number(parsed.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25)),
       breakEven: Number(parsed.breakEven ?? price),
       trailingStop: Number(parsed.trailingStop ?? price),
-      confidence: clampNumber(parsed.confidence ?? 80, 68, 98),
+      confidence: clampNumber(parsed.confidence ?? 82, 68, 98),
       reason: parsed.reason || 'تحليل ذكي وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.',
       timeframe,
       strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
@@ -96,40 +116,13 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ success: true, trade });
   } catch (error) {
-    const fallback = buildFallbackTrade(req.body || {});
-    return res.status(200).json({ success: false, error: error.message, trade: fallback });
+    return res.status(500).json({
+      success: false,
+      error: error?.message || 'Gemini request failed.',
+    });
   }
 }
 
 function clampNumber(value, min, max) {
   return Math.min(Math.max(Number(value || min), min), max);
 }
-
-function buildFallbackTrade(payload = {}) {
-  const symbol = payload.symbol || 'XAUUSD';
-  const timeframe = payload.timeframe || '1m';
-  const mode = payload.mode || 'standard';
-  const current = payload.current || {};
-  const price = Number(current.price ?? 2346.42);
-  const direction = current?.indicators?.rsi > 55 ? 'SELL' : 'BUY';
-  const stopDistance = mode === 'scalp' ? 1.8 : 4.5;
-  const entry = price;
-
-  return {
-    direction,
-    entry,
-    stopLoss: direction === 'BUY' ? entry - stopDistance : entry + stopDistance,
-    tp1: direction === 'BUY' ? entry + 3.2 : entry - 3.2,
-    tp2: direction === 'BUY' ? entry + 5.9 : entry - 5.9,
-    tp3: direction === 'BUY' ? entry + 8.6 : entry - 8.6,
-    lotSize: mode === 'scalp' ? 0.12 : 0.25,
-    breakEven: direction === 'BUY' ? entry + 0.9 : entry - 0.9,
-    trailingStop: direction === 'BUY' ? entry + 1.2 : entry - 1.2,
-    confidence: 81,
-    reason: 'تحليل احتياطي محلي عند عدم توفر البيانات الفورية من الخادم.',
-    timeframe,
-    strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
-    mode,
-    symbol,
-  };
-    }
