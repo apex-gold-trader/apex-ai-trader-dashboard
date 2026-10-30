@@ -4,12 +4,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body ?? {});
-    const body = safeJsonParse(rawBody, {});
-
-    const symbol = String(body.symbol || 'XAUUSD');
-    const timeframe = String(body.timeframe || '1m');
-    const mode = String(body.mode || 'standard');
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body ?? {};
+    const symbol = body.symbol || 'XAUUSD';
+    const timeframe = body.timeframe || '1m';
+    const mode = body.mode || 'standard';
     const market = body.current || {};
     const price = Number(market.price ?? 0);
     const indicators = market.indicators || {};
@@ -18,23 +16,7 @@ export default async function handler(req, res) {
     const emaLong = Number(indicators.emaLong ?? price);
     const macd = Number(indicators.macd ?? 0);
 
-    const apiKey = 'AQ.Ab8RN6LFwqmxfTfLs3lyDJd3_NU5IMw1FdJx93GEszMi69uUaQ';
-    if (!apiKey) {
-      return res.status(500).json({
-        success: false,
-        error: 'Missing GEMINI_API_KEY in environment variables.',
-      });
-    }
-
-    const isOAuthKey = apiKey.startsWith('AQ.');
-    const endpoint = isOAuthKey
-      ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
-      : `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
-
-    const headers = {
-      'Content-Type': 'application/json',
-      ...(isOAuthKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    };
+    const apiKey = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6L8cpGu6IIBo3MtbBfkfpQXFRHSeeBeKGmg_kXcui1M9g';
 
     const prompt = `
       أنت محلل فني احترافي للأسواق المالية.
@@ -49,14 +31,14 @@ export default async function handler(req, res) {
 
       المطلوب:
       1) تحديد الاتجاه BUY أو SELL.
-      2) أسعار الدخول، وقف الخسارة، TP1، TP2، TP3.
+      2) سعر الدخول، وقف الخسارة، TP1، TP2، TP3.
       3) حجم اللوت.
       4) نقطة Breakeven.
       5) confidence من 0 إلى 100.
       6) شرح بالعربية.
       7) تجنب فخاخ السيولة، واحتفظ بوقف الخسارة في مناطق أمان خلف الدوامات الوهمية.
 
-      أعد JSON فقط بدون Markdown.
+      أعد JSON فقط:
       {
         "direction": "BUY|SELL",
         "entry": 1234.56,
@@ -72,15 +54,11 @@ export default async function handler(req, res) {
       }
     `;
 
-    const response = await fetch(endpoint, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
       method: 'POST',
-      headers,
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
+        contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.2,
           maxOutputTokens: 512,
@@ -88,58 +66,28 @@ export default async function handler(req, res) {
       }),
     });
 
-    const responseText = await response.text();
-
     if (!response.ok) {
-      let parsedError = {};
-      try {
-        parsedError = JSON.parse(responseText);
-      } catch {
-        parsedError = { error: responseText };
-      }
-
-      return res.status(response.status).json({
-        success: false,
-        error: parsedError?.error?.message || parsedError?.message || responseText || 'Gemini request failed',
-      });
+      throw new Error(`Gemini API responded with status ${response.status}`);
     }
 
-    let responseData;
-    try {
-      responseData = JSON.parse(responseText);
-    } catch {
-      return res.status(500).json({
-        success: false,
-        error: 'Invalid JSON returned from Gemini.',
-      });
-    }
+    const data = await response.json();
+    const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const cleaned = rawText.replace(/```json|```/g, '').trim();
 
-    const rawText =
-      responseData?.candidates?.[0]?.content?.parts
-        ?.map((part) => part?.text || '')
-        .join('') || '{}';
-
-    const parsedTrade = extractJsonObject(rawText);
-
-    if (!parsedTrade) {
-      return res.status(500).json({
-        success: false,
-        error: 'Gemini returned an empty or malformed trade payload.',
-      });
-    }
+    const parsed = JSON.parse(cleaned);
 
     const trade = {
-      direction: String(parsedTrade.direction || (rsi > 55 ? 'SELL' : 'BUY')).toUpperCase(),
-      entry: Number(parsedTrade.entry ?? price),
-      stopLoss: Number(parsedTrade.stopLoss ?? (parsedTrade.direction === 'BUY' ? price - 1.8 : price + 1.8)),
-      tp1: Number(parsedTrade.tp1 ?? (parsedTrade.direction === 'BUY' ? price + 3.2 : price - 3.2)),
-      tp2: Number(parsedTrade.tp2 ?? (parsedTrade.direction === 'BUY' ? price + 5.8 : price - 5.8)),
-      tp3: Number(parsedTrade.tp3 ?? (parsedTrade.direction === 'BUY' ? price + 8.2 : price - 8.2)),
-      lotSize: Number(parsedTrade.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25)),
-      breakEven: Number(parsedTrade.breakEven ?? price),
-      trailingStop: Number(parsedTrade.trailingStop ?? price),
-      confidence: clampNumber(parsedTrade.confidence ?? 82, 68, 98),
-      reason: String(parsedTrade.reason || 'تحليل دقيق وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.'),
+      direction: parsed.direction || (rsi > 55 ? 'SELL' : 'BUY'),
+      entry: Number(parsed.entry ?? price),
+      stopLoss: Number(parsed.stopLoss ?? (parsed.direction === 'BUY' ? price - 1.8 : price + 1.8)),
+      tp1: Number(parsed.tp1 ?? (parsed.direction === 'BUY' ? price + 3.2 : price - 3.2)),
+      tp2: Number(parsed.tp2 ?? (parsed.direction === 'BUY' ? price + 5.8 : price - 5.8)),
+      tp3: Number(parsed.tp3 ?? (parsed.direction === 'BUY' ? price + 8.2 : price - 8.2)),
+      lotSize: Number(parsed.lotSize ?? (mode === 'scalp' ? 0.12 : 0.25)),
+      breakEven: Number(parsed.breakEven ?? price),
+      trailingStop: Number(parsed.trailingStop ?? price),
+      confidence: clampNumber(parsed.confidence ?? 80, 68, 98),
+      reason: parsed.reason || 'تحليل ذكي وفق السعر الحالي ومؤشرات الزخم مع إدارة مخاطرة متحكمة.',
       timeframe,
       strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
       mode,
@@ -148,50 +96,40 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ success: true, trade });
   } catch (error) {
-    return res.status(200).json({
-      success: false,
-      error: error?.message || 'Analysis unavailable',
-    });
-  }
-}
-
-function safeJsonParse(value, fallback) {
-  if (value === undefined || value === null || value === '') return fallback;
-
-  if (typeof value === 'object') return value;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
+    const fallback = buildFallbackTrade(req.body || {});
+    return res.status(200).json({ success: false, error: error.message, trade: fallback });
   }
 }
 
 function clampNumber(value, min, max) {
-  const numeric = Number(value ?? min);
-  if (!Number.isFinite(numeric)) return min;
-  return Math.min(Math.max(numeric, min), max);
+  return Math.min(Math.max(Number(value || min), min), max);
 }
 
-function extractJsonObject(rawText) {
-  if (!rawText || typeof rawText !== 'string') return null;
+function buildFallbackTrade(payload = {}) {
+  const symbol = payload.symbol || 'XAUUSD';
+  const timeframe = payload.timeframe || '1m';
+  const mode = payload.mode || 'standard';
+  const current = payload.current || {};
+  const price = Number(current.price ?? 2346.42);
+  const direction = current?.indicators?.rsi > 55 ? 'SELL' : 'BUY';
+  const stopDistance = mode === 'scalp' ? 1.8 : 4.5;
+  const entry = price;
 
-  const cleaned = rawText
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
-    .trim();
-
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-    return null;
-  }
-
-  const candidate = cleaned.slice(firstBrace, lastBrace + 1);
-
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    return null;
-  }
+  return {
+    direction,
+    entry,
+    stopLoss: direction === 'BUY' ? entry - stopDistance : entry + stopDistance,
+    tp1: direction === 'BUY' ? entry + 3.2 : entry - 3.2,
+    tp2: direction === 'BUY' ? entry + 5.9 : entry - 5.9,
+    tp3: direction === 'BUY' ? entry + 8.6 : entry - 8.6,
+    lotSize: mode === 'scalp' ? 0.12 : 0.25,
+    breakEven: direction === 'BUY' ? entry + 0.9 : entry - 0.9,
+    trailingStop: direction === 'BUY' ? entry + 1.2 : entry - 1.2,
+    confidence: 81,
+    reason: 'تحليل احتياطي محلي عند عدم توفر البيانات الفورية من الخادم.',
+    timeframe,
+    strategy: mode === 'scalp' ? 'سكالبينغ سريع ومضاد لفخاخ السيولة' : 'تحليل فني هجين مع إدارة مخاطر دقيقة',
+    mode,
+    symbol,
+  };
 }
