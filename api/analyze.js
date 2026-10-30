@@ -17,7 +17,7 @@ export default async function handler(req, res) {
     const macd = Number(indicators.macd ?? 0);
 
     // مفتاح API مباشر وصريح لضمان عدم حدوث أي خطأ في Vercel
-    const apiKey = 'AQ.Ab8RN6L8cpGu6IIBo3MtbBfkfpQXFRHSeeBeKGmg_kXcui1M9g';
+    const apiKey = 'AQ.Ab8RN6K7La1ZG5e82XqTt4pmx9cvH0OGn1t4F-cutIx4qi7wnQ';
 
     const prompt = `
       أنت محلل فني احترافي للأسواق المالية.
