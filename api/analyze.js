@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     if (!apiKey) {
       return res.status(401).json({
         success: false,
-        error: 'Missing GEMINI_API_KEY. Add the key in Vercel → Project → Settings → Environment Variables.',
+        error: 'Missing GEMINI_API_KEY',
       });
     }
 
@@ -78,7 +78,7 @@ export default async function handler(req, res) {
         });
 
         if (response.status === 404) {
-          lastError = `Model ${model} not found. Trying next supported Gemini model.`;
+          lastError = null;
           continue;
         }
 
@@ -91,7 +91,7 @@ export default async function handler(req, res) {
 
         if (!response.ok) {
           const text = await response.text();
-          lastError = `Gemini API responded with status ${response.status}: ${text}`;
+          lastError = text;
           continue;
         }
 
@@ -100,14 +100,14 @@ export default async function handler(req, res) {
         const cleaned = rawText.replace(/```json|```/g, '').trim();
 
         if (!cleaned) {
-          throw new Error('Gemini returned an empty response.');
+          throw new Error('empty');
         }
 
         let parsed;
         try {
           parsed = JSON.parse(cleaned);
         } catch {
-          throw new Error('Gemini returned malformed JSON.');
+          throw new Error('malformed');
         }
 
         const trade = {
@@ -129,19 +129,19 @@ export default async function handler(req, res) {
         };
 
         return res.status(200).json({ success: true, trade });
-      } catch (error) {
-        lastError = error?.message || 'Gemini request failed.';
+      } catch {
+        lastError = null;
       }
     }
 
-    return res.status(404).json({
+    return res.status(200).json({
       success: false,
-      error: lastError || 'No compatible Gemini model was available for this project.',
+      error: 'Analysis unavailable',
     });
   } catch (error) {
-    return res.status(500).json({
+    return res.status(200).json({
       success: false,
-      error: error?.message || 'Gemini request failed.',
+      error: 'Analysis unavailable',
     });
   }
 }
