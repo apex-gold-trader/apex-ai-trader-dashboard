@@ -18,21 +18,10 @@ export default async function handler(req, res) {
     const bollingerUpper = Number(indicators.bollingerUpper ?? price);
     const bollingerLower = Number(indicators.bollingerLower ?? price);
 
-    const apiKey = normalizeApiKey(process.env.GEMINI_API_KEY);
-    if (!apiKey) {
-      throw new Error('GEMINI_API_KEY is missing');
-    }
+    const apiKey = 'AQ.Ab8RN6IEDrzQIWNRWro1LHEy2F238IMswDuZTfUybNTkfDQK_g';
+    const requestUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
 
-    const useAuthHeader = /^AQ\./.test(apiKey);
-    const baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-    const requestUrl = useAuthHeader ? baseUrl : `${baseUrl}?key=${encodeURIComponent(apiKey)}`;
-
-    const headers = {
-      'Content-Type': 'application/json',
-      ...(useAuthHeader ? { Authorization: `Bearer ${apiKey}` } : {}),
-    };
-
-    const systemPrompt = buildPrompt({
+    const prompt = buildPrompt({
       symbol,
       timeframe,
       mode,
@@ -45,16 +34,14 @@ export default async function handler(req, res) {
       bollingerLower,
     });
 
-    const geminiResponse = await fetch(requestUrl, {
+    const response = await fetch(requestUrl, {
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
       body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: systemPrompt }],
-          },
-        ],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: {
           temperature: 0.15,
           topP: 0.9,
@@ -64,31 +51,31 @@ export default async function handler(req, res) {
       }),
     });
 
-    const responseText = await geminiResponse.text();
-    let parsedApiResponse = {};
+    const responseText = await response.text();
+    let parsedResponse = {};
     try {
-      parsedApiResponse = responseText ? JSON.parse(responseText) : {};
+      parsedResponse = responseText ? JSON.parse(responseText) : {};
     } catch {
-      parsedApiResponse = {};
+      parsedResponse = {};
     }
 
-    if (!geminiResponse.ok) {
-      const message = parsedApiResponse?.error?.message || responseText || `Gemini API responded with status ${geminiResponse.status}`;
+    if (!response.ok) {
+      const message = parsedResponse?.error?.message || responseText || `Gemini API responded with status ${response.status}`;
       throw new Error(message);
     }
 
-    const extracted = extractGeminiText(parsedApiResponse);
+    const extracted = extractGeminiText(parsedResponse);
     if (!extracted) {
       throw new Error('Gemini returned an empty response');
     }
 
-    const cleanJson = extractJsonObject(extracted);
-    if (!cleanJson) {
-      throw new Error('Gemini response was not valid JSON');
+    const jsonObject = extractJsonObject(extracted);
+    if (!jsonObject) {
+      throw new Error('Gemini did not return valid JSON');
     }
 
     const trade = normalizeTrade({
-      parsed: cleanJson,
+      parsed: jsonObject,
       symbol,
       timeframe,
       mode,
@@ -126,21 +113,14 @@ function parseJsonBody(rawBody) {
   return rawBody;
 }
 
-function normalizeApiKey(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  if (raw.startsWith('Bearer ')) return raw.replace(/^Bearer\s+/i, '').trim();
-  return raw;
-}
-
 function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
   return `
-أنت محلل فني احترافي للأسواق المالية. مهم جداً: لا تُحِدَّ أو تُحَوّل القرار إلى BUY فقط أو SELL فقط. القرار يجب أن يكون حرّاً تماماً وفق السوق والهيكل والـ momentum وكسر السيولة، وليس وفق انحياز مسبق.
+أنت محلل فني احترافي للأسواق المالية. مهم جداً: لا تفرض اتجاهاً مسبقاً أو تميّز بين BUY و SELL. القرار يجب أن يكون حرّاً تماماً وفق السوق والهيكل، الزخم، وكسر السيولة، وليس وفق تحيز صريح أو رأي ثابت.
 
 بيانات السوق:
 - الأصل: ${symbol}
 - الإطار الزمني: ${timeframe}
-- النمط: ${mode}
+- النوع: ${mode}
 - السعر الحالي: ${price}
 - RSI: ${rsi}
 - EMA قصيرة: ${emaShort}
@@ -149,17 +129,16 @@ function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, m
 - Bollinger Upper: ${bollingerUpper}
 - Bollinger Lower: ${bollingerLower}
 
-مهم:
-1) اختر direction بحرية وفق تحليل السوق الحقيقي: BUY أو SELL.
-2) لا توجد أي قاعدة ثابتة "BUY إجباري" أو "SELL إجباري".
-3) احتسب Stop Hunt / Liquidity Sweep بشكل محترف: تجنب الدخول قرب السيولة المكسورة، وحدد SL وراء المناطق الموثوقة.
-4) أضف TP1, TP2, TP3 بشكل منطقي مع توسيع الهدف تدريجياً.
-5) احسب lotSize بحذر وفق حجم المخاطرة وليست قيمة ثابتة.
-6) أعد JSON فقط بدون Markdown، بدون شيفرات، بدون شرح إضافي.
+المطلوب:
+1) تحديد direction = BUY أو SELL بشكل حقيقي حسب السوق.
+2) حساب entry, stopLoss, tp1, tp2, tp3, lotSize, breakEven.
+3) احتساب حماية Stop Hunt / Liquidity Sweep بدقة.
+4) تجنب المناطق المكسورة أو مناطق الخداع.
+5) أعد JSON فقط بدون Markdown ولا أي نص إضافي.
 
-النسق المطلوب:
+النسق الرسمي:
 {
-  "direction": "BUY|SELL",
+  "direction": "BUY",
   "entry": 1234.56,
   "stopLoss": 1233.5,
   "tp1": 1238.1,
@@ -171,8 +150,8 @@ function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, m
   "reason": "شرح بالعربية"
 }
 
-القاعدة الأساسية: إذا كان السوق يظهر ضعفاً أو اختراقاً أو كسر سيولة مع ضغط SELL، لا تتردد في إعطاء SELL، وإذا كان السوق يثبت قوة وكسر طلب واحتفاظاً فوق منطقة دعم، لا تتردد في إعطاء BUY.
-`; 
+مهم: إذا كان السوق يضعف أو ينهار في مستوى سيولة، فقم بإعطاء SELL. إذا كان السوق يثبت كسر طلب أو دعم، فقم بإعطاء BUY. لا تقيّد نفسك باتجاه معين.
+`;
 }
 
 function extractGeminiText(data) {
@@ -190,12 +169,6 @@ function extractGeminiText(data) {
 
   if (typeof data?.text === 'string' && data.text.trim()) return data.text;
   if (typeof data?.output === 'string' && data.output.trim()) return data.output;
-  if (Array.isArray(data?.outputs)) {
-    for (const output of data.outputs) {
-      if (typeof output === 'string' && output.trim()) return output;
-      if (output && typeof output?.text === 'string' && output.text.trim()) return output.text;
-    }
-  }
 
   return '';
 }
@@ -223,22 +196,22 @@ function extractJsonObject(text) {
 
 function normalizeTrade({ parsed = {}, symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
   const direction = normalizeDirection(parsed.direction, { price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower });
+  const entry = Number(parsed.entry ?? price);
+  const stopDistance = Number(parsed.stopLoss ?? computeStopDistance({ symbol, price, timeframe, direction }));
 
-  const baseEntry = Number(parsed.entry ?? price);
-  const stopDistance = Math.max(Number(parsed.stopLoss ?? 0), computeStopDistance({ symbol, price, timeframe, direction }));
-  const tp1 = Number(parsed.tp1 ?? (direction === 'BUY' ? baseEntry + stopDistance * 1.5 : baseEntry - stopDistance * 1.5));
-  const tp2 = Number(parsed.tp2 ?? (direction === 'BUY' ? baseEntry + stopDistance * 2.4 : baseEntry - stopDistance * 2.4));
-  const tp3 = Number(parsed.tp3 ?? (direction === 'BUY' ? baseEntry + stopDistance * 3.2 : baseEntry - stopDistance * 3.2));
+  const stopLossValue = Number(parsed.stopLoss ?? (direction === 'BUY' ? entry - stopDistance : entry + stopDistance));
+  const tp1 = Number(parsed.tp1 ?? (direction === 'BUY' ? entry + stopDistance * 1.5 : entry - stopDistance * 1.5));
+  const tp2 = Number(parsed.tp2 ?? (direction === 'BUY' ? entry + stopDistance * 2.4 : entry - stopDistance * 2.4));
+  const tp3 = Number(parsed.tp3 ?? (direction === 'BUY' ? entry + stopDistance * 3.2 : entry - stopDistance * 3.2));
+  const breakEven = Number(parsed.breakEven ?? (direction === 'BUY' ? entry + stopDistance * 0.35 : entry - stopDistance * 0.35));
   const lotSize = Number(parsed.lotSize ?? calculateLotSize({ stopDistance, mode }));
-  const breakEven = Number(parsed.breakEven ?? (direction === 'BUY' ? baseEntry + stopDistance * 0.35 : baseEntry - stopDistance * 0.35));
-  const stopLoss = Number(parsed.stopLoss ?? (direction === 'BUY' ? baseEntry - stopDistance : baseEntry + stopDistance));
-  const confidence = clampNumber(Number(parsed.confidence ?? 80), 70, 97);
-  const reason = String(parsed.reason || 'تحليل سوقي وفق الهيكل الحالي، الزخم، وكسر السيولة مع إدارة مخاطرة دقيقة.');
+  const confidence = clampNumber(Number(parsed.confidence ?? 82), 70, 97);
+  const reason = String(parsed.reason || 'تحليل فني يراعي السوق اللحظي، الزخم، وكسر السيولة مع إدارة مخاطرة دقيقة.');
 
   return {
     direction,
-    entry: Number.isFinite(baseEntry) ? baseEntry : price,
-    stopLoss: Number.isFinite(stopLoss) ? stopLoss : 0,
+    entry: Number.isFinite(entry) ? entry : price || 0,
+    stopLoss: Number.isFinite(stopLossValue) ? stopLossValue : 0,
     tp1: Number.isFinite(tp1) ? tp1 : 0,
     tp2: Number.isFinite(tp2) ? tp2 : 0,
     tp3: Number.isFinite(tp3) ? tp3 : 0,
@@ -249,7 +222,7 @@ function normalizeTrade({ parsed = {}, symbol, timeframe, mode, price, rsi, emaS
     timeframe,
     mode,
     symbol,
-    strategy: mode === 'scalp' ? 'سكالبينغ سريع 1m مع حماية السيولة' : 'تحليل فني متوازن مع إدارة مخاطر محكمة',
+    strategy: mode === 'scalp' ? 'سكالبينغ سريع 1m مع حماية السيولة' : 'تحليل فني متوازن',
     source: 'gemini',
   };
 }
@@ -266,7 +239,7 @@ function normalizeDirection(value, { price, rsi, emaShort, emaLong, macd, bollin
   return rsi >= 50 ? 'SELL' : 'BUY';
 }
 
-function computeStopDistance({ symbol, price, timeframe, direction }) {
+function computeStopDistance({ symbol, timeframe }) {
   const baseMap = {
     XAUUSD: 1.8,
     BTCUSD: 180,
@@ -277,18 +250,16 @@ function computeStopDistance({ symbol, price, timeframe, direction }) {
 
   const base = baseMap[symbol] ?? 1.2;
   const multiplier = timeframe === '1m' ? 1.3 : timeframe === '5m' ? 1.6 : 1.9;
-  const value = Number(base * multiplier);
-  return direction === 'BUY' ? value : value;
+  return Number(base * multiplier);
 }
 
 function calculateLotSize({ stopDistance, mode }) {
   const risk = mode === 'scalp' ? 0.02 : 0.03;
-  const lot = risk / Math.max(stopDistance / 100, 0.1);
-  return clampNumber(lot, 0.01, 1.5);
+  return clampNumber(risk / Math.max(stopDistance / 100, 0.1), 0.01, 1.5);
 }
 
 function clampNumber(value, min, max) {
   const num = Number(value);
   if (!Number.isFinite(num)) return min;
   return Math.min(Math.max(num, min), max);
-}
+      }
