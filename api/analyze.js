@@ -41,11 +41,12 @@ export default async function handler(req, res) {
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent',
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
           contents: [
@@ -54,11 +55,6 @@ export default async function handler(req, res) {
               parts: [{ text: prompt }],
             },
           ],
-          systemInstruction: {
-            parts: [{
-              text: 'أنت محلل فني احترافي للأسواق المالية. أجب فقط JSON صالحًا وباللغة العربية مع قيم رقمية دقيقة.'
-            }],
-          },
           generationConfig: {
             temperature: 0.2,
             topP: 0.9,
