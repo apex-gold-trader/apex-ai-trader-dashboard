@@ -12,7 +12,7 @@ export default async function handler(req, res) {
     body = {};
   }
 
-  const symbol = normalizeSymbol(body.symbol || 'XAUUSD');
+  const symbol = String(body.symbol || 'XAUUSD').toUpperCase();
   const timeframe = String(body.timeframe || '1m');
   const mode = String(body.mode || 'standard');
   const current = body.current || {};
@@ -56,7 +56,7 @@ export default async function handler(req, res) {
           ],
           systemInstruction: {
             parts: [{
-              text: 'أنت محلل فني احترافي للأسواق المالية. أجب فقط JSON بصيغة دقيقة وباللغة العربية مع قيم رقمية صحيحة.',
+              text: 'أنت محلل فني احترافي للأسواق المالية. أجب فقط JSON صالحًا وباللغة العربية مع قيم رقمية دقيقة.'
             }],
           },
           generationConfig: {
@@ -69,31 +69,31 @@ export default async function handler(req, res) {
       }
     );
 
-    const responseText = await response.text();
-    let parsedResponse = {};
+    const rawText = await response.text();
+    let data = {};
     try {
-      parsedResponse = responseText ? JSON.parse(responseText) : {};
+      data = rawText ? JSON.parse(rawText) : {};
     } catch {
-      parsedResponse = {};
+      data = {};
     }
 
     if (!response.ok) {
-      const errorMessage = parsedResponse?.error?.message || responseText || `Gemini API error ${response.status}`;
-      throw new Error(errorMessage);
+      const message = data?.error?.message || rawText || `Gemini API error ${response.status}`;
+      throw new Error(message);
     }
 
-    const extractedText = extractGeminiText(parsedResponse);
-    if (!extractedText) {
+    const generatedText = extractGeminiText(data);
+    if (!generatedText) {
       throw new Error('Gemini returned an empty response');
     }
 
-    const candidate = extractJsonObject(extractedText);
-    if (!candidate || typeof candidate !== 'object') {
+    const parsed = extractJsonObject(generatedText);
+    if (!parsed || typeof parsed !== 'object') {
       throw new Error('Gemini response was not valid JSON');
     }
 
     const trade = normalizeTrade({
-      parsed: candidate,
+      parsed,
       symbol,
       timeframe,
       mode,
@@ -120,10 +120,6 @@ export default async function handler(req, res) {
   }
 }
 
-function normalizeSymbol(value) {
-  return String(value || 'XAUUSD').toUpperCase();
-}
-
 function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
   return `
 أنت محلل فني احترافي للأسواق المالية. أعد تحليلًا عمليًا ودقيقًا بناءً على البيانات الفعلية فقط.
@@ -140,7 +136,7 @@ function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, m
 - Bollinger Upper: ${bollingerUpper}
 - Bollinger Lower: ${bollingerLower}
 
-المطلوب: أعد JSON فقط بدون Markdown وبصيغة دقيقة تمامًا:
+المطلوب: أعد JSON فقط بدون Markdown وبصيغة دقيقة جدًا.
 {
   "direction": "BUY",
   "entry": 1234.56,
