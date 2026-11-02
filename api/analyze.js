@@ -31,26 +31,23 @@ export default async function handler(req, res) {
   const model = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
+    const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(requestUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.2,
+          topP: 0.9,
+          topK: 32,
+          maxOutputTokens: 512,
+          responseMimeType: 'application/json',
         },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.2,
-            topP: 0.9,
-            topK: 32,
-            maxOutputTokens: 512,
-            responseMimeType: 'application/json',
-          },
-        }),
-      }
-    );
+      }),
+    });
 
     const responseText = await response.text();
     let data;
@@ -78,14 +75,7 @@ export default async function handler(req, res) {
       throw new Error('Gemini response did not contain a valid JSON trade object');
     }
 
-    const trade = normalizeTrade({
-      parsed,
-      symbol,
-      timeframe,
-      mode,
-      price,
-    });
-
+    const trade = normalizeTrade({ parsed, symbol, timeframe, mode, price });
     return res.status(200).json({ success: true, source: 'gemini', trade, ...trade });
   } catch (error) {
     return res.status(502).json({
@@ -152,7 +142,6 @@ function normalizeTrade({ parsed, symbol, timeframe, mode, price }) {
     mode,
     symbol,
     strategy: mode === 'scalp' ? 'سكالبينغ فوري 1m' : 'تحليل فني متوازن',
-    // Keep the received market price available to consumers without inventing a recommendation.
     marketPrice: price,
   };
 }
