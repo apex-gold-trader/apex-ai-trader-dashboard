@@ -2,12 +2,11 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ success: false, error: 'Method not allowed' });
-  }
 
-  const apiKey = "AQ.Ab8RN6KQI6lq7PrHvSx5GllrbESOGG6VqBGDTj5O6ayexGEnHw";
+  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on the server' });
+  }
 
   let body;
   try {
@@ -31,19 +30,12 @@ export default async function handler(req, res) {
   const prompt = buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower });
 
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.2,
-          topP: 0.9,
-          topK: 32,
-          maxOutputTokens: 512,
-          responseMimeType: 'application/json',
-        },
       }),
     });
 
@@ -52,22 +44,24 @@ export default async function handler(req, res) {
     try {
       data = responseText ? JSON.parse(responseText) : {};
     } catch {
-      throw new Error(`Gemini returned a non-JSON HTTP response (${response.status})`);
+      throw new Error(`Gemini returned a non-JSON HTTP response (${response.status}): ${responseText.slice(0, 500)}`);
     }
 
     if (!response.ok) {
       throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
     }
 
-    const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-    if (!generatedText) {
+    const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof generatedText !== 'string' || !generatedText.trim()) {
       const finishReason = data?.candidates?.[0]?.finishReason;
-      throw new Error(finishReason ? `Gemini returned no text (finish reason: ${finishReason})` : 'Gemini returned an empty response');
+      throw new Error(finishReason
+        ? `Gemini returned no text (finish reason: ${finishReason})`
+        : 'Gemini response did not contain candidates[0].content.parts[0].text');
     }
 
     const parsed = extractJsonObject(generatedText);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Gemini response did not contain a valid JSON trade object');
+      throw new Error('Gemini response text was not a valid JSON trade object');
     }
 
     const trade = normalizeTrade({ parsed, symbol, timeframe, mode, price });
@@ -75,7 +69,7 @@ export default async function handler(req, res) {
   } catch (error) {
     return res.status(502).json({
       success: false,
-      error: String(error?.message || 'Gemini API request failed'),
+      error: String(error?.message || error || 'Gemini API request failed'),
     });
   }
 }
@@ -86,7 +80,7 @@ function finiteNumber(value, fallback) {
 }
 
 function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
-  return `أنت محلل فني. حلل البيانات المقدمة فقط، ولا تدّعِ امتلاك بيانات سوق مباشرة إضافية. أعد كائن JSON صالحًا فقط دون Markdown، مع هذه الحقول الرقمية: direction (BUY أو SELL), entry, stopLoss, tp1, tp2, tp3, lotSize, breakEven, confidence, reason.
+  return `أنت محلل فني. حلل البيانات المقدمة فقط، ولا تدّعِ امتلاك بيانات سوق مباشرة إضافية. أعد كائن JSON صالحًا فقط دون Markdown، مع هذه الحقول: direction (BUY أو SELL), entry, stopLoss, tp1, tp2, tp3, lotSize, breakEven, confidence, reason.
 
 الأصل: ${symbol}
 الإطار الزمني: ${timeframe}
