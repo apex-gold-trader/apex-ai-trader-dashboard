@@ -5,7 +5,7 @@ export default async function handler(req, res) {
 
   const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
   if (!apiKey) {
-    return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on the server' });
+    return res.status(500).json({ success: false, error: 'AQ.Ab8RN6JYwGlll2T7X34Yw_nFGGhybj8gbZoLLWkzoife6hKZ-Q' });
   }
 
   let body;
