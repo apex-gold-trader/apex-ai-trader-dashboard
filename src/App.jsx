@@ -305,9 +305,13 @@ function App() {
       });
 
       const payload = await response.json();
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.error || 'فشل تحليل Gemini مباشرة');
+      }
+
       const trade = payload?.trade || payload;
       if (!trade || !Number.isFinite(Number(trade.entry))) {
-        throw new Error('لا يوجد تحليل صالح في الوقت الحالي');
+        throw new Error('لا يوجد تحليل صالح من Gemini');
       }
 
       const normalized = {
@@ -330,25 +334,9 @@ function App() {
       persistSignal(normalized);
       setActiveTab('signals');
     } catch (error) {
-      const fallback = {
-        direction: 'BUY',
-        entry: current?.price ?? DEFAULT_BASES[selectedSymbol],
-        stopLoss: (current?.price ?? DEFAULT_BASES[selectedSymbol]) - 2,
-        tp1: (current?.price ?? DEFAULT_BASES[selectedSymbol]) + 3,
-        tp2: (current?.price ?? DEFAULT_BASES[selectedSymbol]) + 5,
-        tp3: (current?.price ?? DEFAULT_BASES[selectedSymbol]) + 8,
-        lotSize: 0.1,
-        breakEven: (current?.price ?? DEFAULT_BASES[selectedSymbol]) + 1,
-        confidence: 82,
-        reason: 'تم إنشاء تحليل احتياطي محلي فقط عند فشل اتصال الخادم؛ يجب أن يتجاوب Gemini بشكل صحيح.',
-        timeframe,
-        mode,
-        symbol: selectedSymbol,
-      };
-      setAnalysis(fallback);
-      persistSignal(fallback);
-      setActiveTab('signals');
+      setAnalysis(null);
       console.error(error);
+      window.alert('فشل تحليل Gemini مباشرة. الرجاء المحاولة مرة أخرى.');
     } finally {
       setLoadingAi(false);
     }
@@ -421,7 +409,7 @@ function App() {
                         <strong>{signal.label}</strong>
                       </div>
                     </div>
-                    <div className="value-block"><span>ا��دخول</span><strong>{formatPrice(signal.entry, signal.symbol)}</strong></div>
+                    <div className="value-block"><span>إدخال</span><strong>{formatPrice(signal.entry, signal.symbol)}</strong></div>
                     <div className="value-block"><span>وقف الخسارة</span><strong>{formatPrice(signal.stopLoss, signal.symbol)}</strong></div>
                     <div className="value-block"><span>الأهداف</span><strong>{formatPrice(signal.tp1, signal.symbol)} / {formatPrice(signal.tp2, signal.symbol)}</strong></div>
                     <div className="value-block">
