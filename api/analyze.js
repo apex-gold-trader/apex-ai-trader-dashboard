@@ -18,10 +18,7 @@ export default async function handler(req, res) {
     const bollingerUpper = Number(indicators.bollingerUpper ?? price || 0);
     const bollingerLower = Number(indicators.bollingerLower ?? price || 0);
 
-    const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-    if (!apiKey) {
-      throw new Error('GEMINI_API_KEY is missing');
-    }
+    const apiKey = 'AQ.Ab8RN6IEDrzQIWNRWro1LHEy2F238IMswDuZTfUybNTkfDQK_g';
 
     const payload = {
       contents: [{ role: 'user', parts: [{ text: buildPrompt({
