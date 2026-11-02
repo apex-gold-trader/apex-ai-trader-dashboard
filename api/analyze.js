@@ -3,9 +3,9 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) {
-    return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on the server' });
+  const apiKey = "ضع_المفتاح_هنا";
+  if (!apiKey || apiKey === 'ضع_المفتاح_هنا') {
+    return res.status(500).json({ success: false, error: 'Set the Gemini API key in api/analyze.js' });
   }
 
   let body;
@@ -28,16 +28,12 @@ export default async function handler(req, res) {
   const bollingerUpper = finiteNumber(indicators.bollingerUpper, price);
   const bollingerLower = finiteNumber(indicators.bollingerLower, price);
   const prompt = buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower });
-  const model = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 
   try {
-    const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-    const response = await fetch(requestUrl, {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
@@ -62,10 +58,7 @@ export default async function handler(req, res) {
       throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
     }
 
-    const generatedText = data?.candidates?.[0]?.content?.parts
-      ?.map((part) => typeof part?.text === 'string' ? part.text : '')
-      .join('')
-      .trim();
+    const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
     if (!generatedText) {
       const finishReason = data?.candidates?.[0]?.finishReason;
       throw new Error(finishReason ? `Gemini returned no text (finish reason: ${finishReason})` : 'Gemini returned an empty response');
@@ -92,7 +85,7 @@ function finiteNumber(value, fallback) {
 }
 
 function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
-  return `أنت محل�� فني. حلل البيانات المقدمة فقط، ولا تدّعِ امتلاك بيانات سوق مباشرة إضافية. أعد كائن JSON صالحًا فقط دون Markdown، مع هذه الحقول الرقمية: direction (BUY أو SELL), entry, stopLoss, tp1, tp2, tp3, lotSize, breakEven, confidence, reason.
+  return `أنت محلل فني. حلل البيانات المقدمة فقط، ولا تدّعِ امتلاك بيانات سوق مباشرة إضافية. أعد كائن JSON صالحًا فقط دون Markdown، مع هذه الحقول الرقمية: direction (BUY أو SELL), entry, stopLoss, tp1, tp2, tp3, lotSize, breakEven, confidence, reason.
 
 الأصل: ${symbol}
 الإطار الزمني: ${timeframe}
