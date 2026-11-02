@@ -31,11 +31,12 @@ export default async function handler(req, res) {
   const model = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 
   try {
-    const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const requestUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     const response = await fetch(requestUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
       },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
