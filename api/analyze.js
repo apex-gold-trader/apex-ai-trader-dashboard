@@ -3,57 +3,71 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
+  const apiKey = 'AQ.Ab8RN6IEDrzQIWNRWro1LHEy2F238IMswDuZTfUybNTkfDQK_g';
+
+  let body = {};
   try {
-    const body = parseRequestBody(req.body);
-    const symbol = normalizeSymbol(body.symbol || 'XAUUSD');
-    const timeframe = String(body.timeframe || '1m');
-    const mode = String(body.mode || 'standard');
-    const current = body.current || {};
-    const price = Number(current.price ?? 0);
-    const indicators = current.indicators || {};
-    const rsi = Number(indicators.rsi ?? 50);
-    const emaShort = Number(indicators.emaShort ?? price || 0);
-    const emaLong = Number(indicators.emaLong ?? price || 0);
-    const macd = Number(indicators.macd ?? 0);
-    const bollingerUpper = Number(indicators.bollingerUpper ?? price || 0);
-    const bollingerLower = Number(indicators.bollingerLower ?? price || 0);
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+  } catch {
+    body = {};
+  }
 
-    const apiKey = 'AQ.Ab8RN6IEDrzQIWNRWro1LHEy2F238IMswDuZTfUybNTkfDQK_g';
+  const symbol = normalizeSymbol(body.symbol || 'XAUUSD');
+  const timeframe = String(body.timeframe || '1m');
+  const mode = String(body.mode || 'standard');
+  const current = body.current || {};
+  const price = Number(current.price ?? 0);
+  const indicators = current.indicators || {};
 
-    const payload = {
-      contents: [{ role: 'user', parts: [{ text: buildPrompt({
-        symbol,
-        timeframe,
-        mode,
-        price,
-        rsi,
-        emaShort,
-        emaLong,
-        macd,
-        bollingerUpper,
-        bollingerLower,
-      }) }] }],
-      generationConfig: {
-        temperature: 0.2,
-        topP: 0.9,
-        topK: 32,
-        maxOutputTokens: 512,
-      },
-    };
+  const rsi = Number(indicators.rsi ?? 50);
+  const emaShort = Number(indicators.emaShort ?? price || 0);
+  const emaLong = Number(indicators.emaLong ?? price || 0);
+  const macd = Number(indicators.macd ?? 0);
+  const bollingerUpper = Number(indicators.bollingerUpper ?? price || 0);
+  const bollingerLower = Number(indicators.bollingerLower ?? price || 0);
 
-    const isSessionToken = /^AIza|^AQ\./.test(apiKey) || apiKey.startsWith('eyJ');
-    const requestUrl = isSessionToken
-      ? 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
-      : 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + encodeURIComponent(apiKey);
+  const prompt = buildPrompt({
+    symbol,
+    timeframe,
+    mode,
+    price,
+    rsi,
+    emaShort,
+    emaLong,
+    macd,
+    bollingerUpper,
+    bollingerLower,
+  });
 
-    const response = await fetch(requestUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(isSessionToken ? { Authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify(payload),
-    });
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: prompt }],
+            },
+          ],
+          systemInstruction: {
+            parts: [{
+              text: 'أنت محلل فني احترافي للأسواق المالية. أجب فقط JSON بصيغة دقيقة وباللغة العربية مع قيم رقمية صحيحة.',
+            }],
+          },
+          generationConfig: {
+            temperature: 0.2,
+            topP: 0.9,
+            topK: 32,
+            maxOutputTokens: 512,
+          },
+        }),
+      }
+    );
 
     const responseText = await response.text();
     let parsedResponse = {};
@@ -64,22 +78,22 @@ export default async function handler(req, res) {
     }
 
     if (!response.ok) {
-      const message = parsedResponse?.error?.message || responseText || `Gemini API responded with status ${response.status}`;
-      throw new Error(message);
+      const errorMessage = parsedResponse?.error?.message || responseText || `Gemini API error ${response.status}`;
+      throw new Error(errorMessage);
     }
 
-    const extracted = extractGeminiText(parsedResponse);
-    if (!extracted) {
+    const extractedText = extractGeminiText(parsedResponse);
+    if (!extractedText) {
       throw new Error('Gemini returned an empty response');
     }
 
-    const tradeCandidate = extractJsonObject(extracted);
-    if (!tradeCandidate || typeof tradeCandidate !== 'object') {
+    const candidate = extractJsonObject(extractedText);
+    if (!candidate || typeof candidate !== 'object') {
       throw new Error('Gemini response was not valid JSON');
     }
 
     const trade = normalizeTrade({
-      parsed: tradeCandidate,
+      parsed: candidate,
       symbol,
       timeframe,
       mode,
@@ -99,27 +113,11 @@ export default async function handler(req, res) {
       ...trade,
     });
   } catch (error) {
-    const fallback = buildFallbackTrade(parseRequestBody(req.body));
-    return res.status(200).json({
-      success: true,
-      source: 'fallback',
-      warning: String(error?.message || 'Gemini analysis failed; local fallback used'),
-      trade: fallback,
-      ...fallback,
+    return res.status(500).json({
+      success: false,
+      error: String(error?.message || 'Gemini API request failed'),
     });
   }
-}
-
-function parseRequestBody(raw) {
-  if (!raw) return {};
-  if (typeof raw === 'string') {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {};
-    }
-  }
-  return raw;
 }
 
 function normalizeSymbol(value) {
@@ -128,12 +126,12 @@ function normalizeSymbol(value) {
 
 function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
   return `
-أنت محلل فني احترافي للأسواق المالية. لا تكرر نصًا عامًا. أعد تحليلاً موثوقًا بناءً على السوق الحقيقي.
+أنت محلل فني احترافي للأسواق المالية. أعد تحليلًا عمليًا ودقيقًا بناءً على البيانات الفعلية فقط.
 
-البيانات:
+البيانات الحالية:
 - الأصل: ${symbol}
 - الإطار الزمني: ${timeframe}
-- النوع: ${mode}
+- النمط: ${mode}
 - السعر الحالي: ${price}
 - RSI: ${rsi}
 - EMA قصيرة: ${emaShort}
@@ -142,7 +140,7 @@ function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, m
 - Bollinger Upper: ${bollingerUpper}
 - Bollinger Lower: ${bollingerLower}
 
-مطلوب: أعد JSON فقط بدون Markdown.
+المطلوب: أعد JSON فقط بدون Markdown وبصيغة دقيقة تمامًا:
 {
   "direction": "BUY",
   "entry": 1234.56,
@@ -153,7 +151,7 @@ function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, m
   "lotSize": 0.25,
   "breakEven": 1235.2,
   "confidence": 82,
-  "reason": "شرح بالعربية"
+  "reason": "شرح موجز بالعربية"
 }
 `;
 }
@@ -161,20 +159,27 @@ function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, m
 function extractGeminiText(data) {
   if (!data || typeof data !== 'object') return '';
 
-  for (const candidate of Array.isArray(data?.candidates) ? data.candidates : []) {
-    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
-    for (const part of parts) {
-      if (typeof part?.text === 'string' && part.text.trim()) return part.text;
+  if (Array.isArray(data?.candidates)) {
+    for (const candidate of data.candidates) {
+      const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+      const texts = parts
+        .filter((part) => typeof part?.text === 'string' && part.text.trim())
+        .map((part) => part.text.trim());
+
+      if (texts.length) {
+        return texts.join('\n');
+      }
     }
   }
 
-  if (typeof data?.text === 'string' && data.text.trim()) return data.text;
-  if (typeof data?.output === 'string' && data.output.trim()) return data.output;
+  if (typeof data?.text === 'string' && data.text.trim()) return data.text.trim();
+  if (typeof data?.output === 'string' && data.output.trim()) return data.output.trim();
   return '';
 }
 
 function extractJsonObject(text) {
   const cleaned = String(text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
+
   try {
     return JSON.parse(cleaned);
   } catch {
@@ -210,7 +215,7 @@ function normalizeTrade({ parsed = {}, symbol, timeframe, mode, price, rsi, emaS
     lotSize: Number.isFinite(lotSize) ? lotSize : 0,
     breakEven: Number.isFinite(breakEven) ? breakEven : 0,
     confidence,
-    reason: String(parsed.reason || 'تحليل فني يحلل السعر الحالي على أسس الزخم، الاستقرار، ومناطق السيولة مع إدارة مخاطرة دقيقة.'),
+    reason: String(parsed.reason || 'تحليل فني من Gemini بناءً على السعر الحالي والزخم ومناطق السيولة.'),
     timeframe,
     mode,
     symbol,
@@ -238,6 +243,7 @@ function computeStopDistance({ symbol, timeframe }) {
     ETHUSD: 14,
     NAS100: 18,
   }[symbol] || 1.5;
+
   const multiplier = timeframe === '1m' ? 1.2 : timeframe === '5m' ? 1.5 : 1.9;
   return base * multiplier;
 }
@@ -245,41 +251,6 @@ function computeStopDistance({ symbol, timeframe }) {
 function calculateLotSize({ stopDistance, mode }) {
   const risk = mode === 'scalp' ? 0.018 : 0.03;
   return clampNumber(risk / Math.max(stopDistance / 100, 0.1), 0.01, 1.5);
-}
-
-function buildFallbackTrade(payload = {}) {
-  const body = parseRequestBody(payload);
-  const symbol = normalizeSymbol(body.symbol || 'XAUUSD');
-  const timeframe = String(body.timeframe || '1m');
-  const mode = String(body.mode || 'standard');
-  const current = body.current || {};
-  const price = Number(current.price ?? {
-    XAUUSD: 2346.42,
-    BTCUSD: 67740.12,
-    EURUSD: 1.0884,
-    ETHUSD: 3592.77,
-    NAS100: 19036.2,
-  }[symbol] ?? 1);
-  const direction = Number(current?.indicators?.rsi ?? 50) >= 50 ? 'SELL' : 'BUY';
-  const stopDistance = mode === 'scalp' ? 1.8 : 4.5;
-
-  const entry = price;
-  return {
-    direction,
-    entry,
-    stopLoss: direction === 'BUY' ? entry - stopDistance : entry + stopDistance,
-    tp1: direction === 'BUY' ? entry + 3.2 : entry - 3.2,
-    tp2: direction === 'BUY' ? entry + 5.9 : entry - 5.9,
-    tp3: direction === 'BUY' ? entry + 8.6 : entry - 8.6,
-    lotSize: mode === 'scalp' ? 0.12 : 0.25,
-    breakEven: direction === 'BUY' ? entry + 0.9 : entry - 0.9,
-    confidence: 81,
-    reason: 'تحليل احتياطي محلي غير مفضل؛ يجب أن ينجح Gemini في كل طلب قبل إظهار النتيجة النهائية.',
-    timeframe,
-    mode,
-    symbol,
-    strategy: mode === 'scalp' ? 'سكالبينغ سريع 1m' : 'تحليل فني متوازن',
-  };
 }
 
 function clampNumber(value, min, max) {
