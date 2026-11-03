@@ -179,6 +179,19 @@ function buildSparkline(series) {
     .join(' ');
 }
 
+async function readJsonResponse(response) {
+  const responseText = await response.text();
+  if (!responseText) {
+    throw new Error(`استجابة الخادم فارغة (HTTP ${response.status})`);
+  }
+
+  try {
+    return JSON.parse(responseText);
+  } catch {
+    throw new Error(`استجابة الخادم ليست JSON صالحاً (HTTP ${response.status})`);
+  }
+}
+
 function App() {
   const [timeframe, setTimeframe] = useState('1m');
   const [loading, setLoading] = useState(true);
@@ -290,44 +303,49 @@ function App() {
   const handleAnalyze = async () => {
     const mode = activeTab === 'scalp' ? 'scalp' : 'standard';
     const current = marketData[selectedSymbol];
+    if (!current) {
+      window.alert('بيانات السوق غير جاهزة للتحليل. يرجى المحاولة مرة أخرى.');
+      return;
+    }
+
     setLoadingAi(true);
 
     try {
       const response = await fetch('/api/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: selectedSymbol,
-          timeframe,
-          mode,
-          current,
-        }),
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ symbol: selectedSymbol, timeframe, mode, current }),
       });
+      const payload = await readJsonResponse(response);
 
-      const payload = await response.json();
-      if (!response.ok || !payload?.success) {
-        throw new Error(payload?.error || 'فشل تحليل Gemini مباشرة');
+      if (!response.ok || payload?.success !== true) {
+        throw new Error(payload?.error || `فشل تحليل OpenRouter (HTTP ${response.status})`);
       }
 
-      const trade = payload?.trade || payload;
-      if (!trade || !Number.isFinite(Number(trade.entry))) {
-        throw new Error('لا يوجد تحليل صالح من Gemini');
+      const trade = payload.trade && typeof payload.trade === 'object' ? payload.trade : payload;
+      const requiredNumbers = ['entry', 'stopLoss', 'tp1', 'tp2', 'tp3', 'lotSize', 'breakEven', 'confidence'];
+      const invalidField = requiredNumbers.find((field) => !Number.isFinite(Number(trade?.[field])));
+      const direction = String(trade?.direction || '').toUpperCase();
+      if (!trade || invalidField || !['BUY', 'SELL'].includes(direction)) {
+        throw new Error(invalidField
+          ? `استجابة OpenRouter لا تحتوي قيمة رقمية صالحة للحقل ${invalidField}`
+          : 'استجابة OpenRouter لا تحتوي توصية تداول صالحة');
       }
 
       const normalized = {
         ...trade,
-        direction: String(trade.direction || 'BUY').toUpperCase(),
-        entry: Number(trade.entry ?? current?.price ?? DEFAULT_BASES[selectedSymbol]),
-        stopLoss: Number(trade.stopLoss ?? 0),
-        tp1: Number(trade.tp1 ?? 0),
-        tp2: Number(trade.tp2 ?? 0),
-        tp3: Number(trade.tp3 ?? 0),
-        lotSize: Number(trade.lotSize ?? 0.1),
-        breakEven: Number(trade.breakEven ?? 0),
-        confidence: clamp(Number(trade.confidence ?? 82), 70, 97),
-        timeframe,
-        mode,
-        symbol: selectedSymbol,
+        direction,
+        entry: Number(trade.entry),
+        stopLoss: Number(trade.stopLoss),
+        tp1: Number(trade.tp1),
+        tp2: Number(trade.tp2),
+        tp3: Number(trade.tp3),
+        lotSize: Number(trade.lotSize),
+        breakEven: Number(trade.breakEven),
+        confidence: clamp(Number(trade.confidence), 0, 100),
+        timeframe: trade.timeframe || timeframe,
+        mode: trade.mode || mode,
+        symbol: trade.symbol || selectedSymbol,
       };
 
       setAnalysis(normalized);
@@ -335,8 +353,9 @@ function App() {
       setActiveTab('signals');
     } catch (error) {
       setAnalysis(null);
-      console.error(error);
-      window.alert('فشل تحليل Gemini مباشرة. الرجاء المحاولة مرة أخرى.');
+      console.error('OpenRouter analysis failed:', error);
+      const message = error instanceof Error ? error.message : String(error || 'خطأ غير معروف');
+      window.alert(`فشل تحليل OpenRouter / Llama 3: ${message}`);
     } finally {
       setLoadingAi(false);
     }
