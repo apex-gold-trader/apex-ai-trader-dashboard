@@ -3,7 +3,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  // استخدام المفتاح الجديد النظيف والموثق
   const apiKey = "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";
 
   let body;
@@ -37,7 +36,7 @@ export default async function handler(req, res) {
         'X-Title': 'Apex AI Trader',
       },
       body: JSON.stringify({
-        model: 'meta-llama/llama-3.3-70b-instruct:free',
+        model: 'deepseek/deepseek-chat:free',
         messages: [{ role: 'user', content: prompt }],
       }),
     });
@@ -143,4 +142,4 @@ function normalizeTrade({ parsed, symbol, timeframe, mode, price }) {
     strategy: mode === 'scalp' ? 'سكالبينغ فوري 1m' : 'تحليل فني متوازن',
     marketPrice: price,
   };
-                      }
+}
