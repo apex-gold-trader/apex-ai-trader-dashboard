@@ -3,12 +3,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  // يقرأ المفتاح المباشر فوراً مع دعم خيار قراءته من البيئة في حال تم ضبطه
-  const apiKey = "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" || String(process.env.OPENROUTER_API_KEY || '').trim();
-
-  if (!apiKey) {
-    return res.status(500).json({ success: false, error: 'OPENROUTER_API_KEY is missing' });
-  }
+  // وضع المفتاح الصريح مباشرة لتجاوز خطأ عدم إعداد متغيرات البيئة على Vercel
+  const apiKey = "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";
 
   let body;
   try {
@@ -38,11 +34,11 @@ export default async function handler(req, res) {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
         'HTTP-Referer': 'https://apex-ai-trader-dashboard-delta.vercel.app',
-        'X-Title': 'Apex AI Trader'
+        'X-Title': 'Apex AI Trader',
       },
       body: JSON.stringify({
         model: 'meta-llama/llama-3.3-70b-instruct:free',
-        messages: [{ role: 'user', content: prompt }]
+        messages: [{ role: 'user', content: prompt }],
       }),
     });
 
@@ -51,7 +47,7 @@ export default async function handler(req, res) {
     try {
       data = responseText ? JSON.parse(responseText) : {};
     } catch {
-      throw new Error(`OpenRouter returned HTTP ${response.status}: ${responseText.slice(0, 200)}`);
+      throw new Error(`OpenRouter returned a non-JSON response (HTTP ${response.status})`);
     }
 
     if (!response.ok) {
@@ -60,7 +56,7 @@ export default async function handler(req, res) {
 
     const recommendation = data?.choices?.[0]?.message?.content;
     if (typeof recommendation !== 'string' || !recommendation.trim()) {
-      throw new Error('OpenRouter response did not contain message content');
+      throw new Error('OpenRouter response did not contain choices[0].message.content');
     }
 
     const parsed = extractJsonObject(recommendation);
@@ -73,7 +69,7 @@ export default async function handler(req, res) {
   } catch (error) {
     return res.status(502).json({
       success: false,
-      error: String(error?.message || error || 'OpenRouter API request failed'),
+      error: String(error?.message || error || 'OpenRouter request failed'),
     });
   }
 }
@@ -84,17 +80,18 @@ function finiteNumber(value, fallback) {
 }
 
 function buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower }) {
-  return `أنت محلل فني خبير. حلل البيانات المقدمة وأعد كائن JSON صالح فقط دون أي نص آخر أو markdown، بالصيغة التالية تماماً:
-{"direction": "BUY", "entry": ${price}, "stopLoss": ${price * 0.99}, "tp1": ${price * 1.01}, "tp2": ${price * 1.02}, "tp3": ${price * 1.03}, "lotSize": 0.1, "breakEven": ${price}, "confidence": 85, "reason": "سبب التحليل الفني"}
+  return `أنت مساعد لتحليل البيانات الفنية المقدمة، وليست توصيتك ضماناً للربح. أعد كائن JSON صالحاً فقط دون Markdown، وبالحقول التالية: direction (BUY أو SELL), entry, stopLoss, tp1, tp2, tp3, lotSize, breakEven, confidence, reason. يجب أن تكون القيم الرقمية أرقاماً فعلية وأن يكون reason نصاً.
 
-بيانات السوق:
 الأصل: ${symbol}
-الإطار: ${timeframe}
+الإطار الزمني: ${timeframe}
+النمط: ${mode}
 السعر: ${price}
 RSI: ${rsi}
-EMA قصير: ${emaShort}
-EMA طويل: ${emaLong}
-MACD: ${macd}`;
+EMA قصيرة: ${emaShort}
+EMA طويلة: ${emaLong}
+MACD: ${macd}
+Bollinger Upper: ${bollingerUpper}
+Bollinger Lower: ${bollingerLower}`;
 }
 
 function extractJsonObject(text) {
@@ -116,30 +113,28 @@ function extractJsonObject(text) {
 function normalizeTrade({ parsed, symbol, timeframe, mode, price }) {
   const direction = String(parsed.direction || parsed.Direction || '').toUpperCase();
   if (direction !== 'BUY' && direction !== 'SELL') {
-    throw new Error('Invalid direction in trade response');
+    throw new Error('OpenRouter trade JSON has an invalid direction');
   }
 
-  const stopLoss = finiteNumber(parsed.stopLoss || parsed.stoploss, price * 0.99);
-  const tp1 = finiteNumber(parsed.tp1, price * 1.01);
-  const tp2 = finiteNumber(parsed.tp2, price * 1.02);
-  const tp3 = finiteNumber(parsed.tp3, price * 1.03);
-  const entry = finiteNumber(parsed.entry, price);
-  const lotSize = finiteNumber(parsed.lotSize || parsed.lotsize, 0.1);
-  const breakEven = finiteNumber(parsed.breakEven || parsed.breakeven, price);
-  const confidence = finiteNumber(parsed.confidence, 80);
+  const fields = ['entry', 'stopLoss', 'tp1', 'tp2', 'tp3', 'lotSize', 'breakEven', 'confidence'];
+  const defaults = {
+    entry: price,
+    stopLoss: price * 0.99,
+    tp1: price * 1.01,
+    tp2: price * 1.02,
+    tp3: price * 1.03,
+    lotSize: 0.1,
+    breakEven: price,
+    confidence: 80,
+  };
+  const aliases = { stopLoss: 'stoploss', lotSize: 'lotsize', breakEven: 'breakeven' };
+  const numericValues = Object.fromEntries(fields.map((field) => {
+    const value = parsed[field] ?? parsed[aliases[field]];
+    return [field, finiteNumber(value, defaults[field])];
+  }));
 
   return {
-    entry,
-    stopLoss,
-    stoploss: stopLoss, // لتجنب أي تعارض في مسميات الواجهة الأمامية
-    tp1,
-    tp2,
-    tp3,
-    lotSize,
-    lotsize: lotSize,
-    breakEven,
-    breakeven: breakEven,
-    confidence,
+    ...numericValues,
     direction,
     reason: String(parsed.reason || 'تحليل بناءً على المؤشرات الحالية'),
     timeframe,
