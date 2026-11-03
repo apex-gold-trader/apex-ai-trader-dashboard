@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   }
 
   // وضع المفتاح الصريح مباشرة لتجاوز خطأ عدم إعداد متغيرات البيئة على Vercel
-  const apiKey = "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";
+  const apiKey = "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;
 
   let body;
   try {
