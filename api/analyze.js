@@ -3,9 +3,9 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+  const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
   if (!apiKey) {
-    return res.status(500).json({ success: false, error: 'AQ.Ab8RN6JYwGlll2T7X34Yw_nFGGhybj8gbZoLLWkzoife6hKZ-Q' });
+    return res.status(500).json({ success: false, error: 'OPENROUTER_API_KEY is not configured on the server' });
   }
 
   let body;
@@ -30,15 +30,15 @@ export default async function handler(req, res) {
   const prompt = buildPrompt({ symbol, timeframe, mode, price, rsi, emaShort, emaLong, macd, bollingerUpper, bollingerLower });
 
   try {
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
-    const response = await fetch(url, {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
+        Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        model: 'meta-llama/llama-3.3-70b-instruct:free',
+        messages: [{ role: 'user', content: prompt }],
       }),
     });
 
@@ -47,32 +47,29 @@ export default async function handler(req, res) {
     try {
       data = responseText ? JSON.parse(responseText) : {};
     } catch {
-      throw new Error(`Gemini returned a non-JSON HTTP response (${response.status}): ${responseText.slice(0, 500)}`);
+      throw new Error(`OpenRouter returned a non-JSON HTTP response (${response.status}): ${responseText.slice(0, 500)}`);
     }
 
     if (!response.ok) {
-      throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
+      throw new Error(data?.error?.message || `OpenRouter API error ${response.status}`);
     }
 
-    const generatedText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof generatedText !== 'string' || !generatedText.trim()) {
-      const finishReason = data?.candidates?.[0]?.finishReason;
-      throw new Error(finishReason
-        ? `Gemini returned no text (finish reason: ${finishReason})`
-        : 'Gemini response did not contain candidates[0].content.parts[0].text');
+    const recommendation = data?.choices?.[0]?.message?.content;
+    if (typeof recommendation !== 'string' || !recommendation.trim()) {
+      throw new Error('OpenRouter response did not contain choices[0].message.content');
     }
 
-    const parsed = extractJsonObject(generatedText);
+    const parsed = extractJsonObject(recommendation);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Gemini response text was not a valid JSON trade object');
+      throw new Error('OpenRouter response text was not a valid JSON trade object');
     }
 
     const trade = normalizeTrade({ parsed, symbol, timeframe, mode, price });
-    return res.status(200).json({ success: true, source: 'gemini', trade, ...trade });
+    return res.status(200).json({ success: true, source: 'openrouter', trade, ...trade });
   } catch (error) {
     return res.status(502).json({
       success: false,
-      error: String(error?.message || error || 'Gemini API request failed'),
+      error: String(error?.message || error || 'OpenRouter API request failed'),
     });
   }
 }
@@ -116,14 +113,14 @@ function extractJsonObject(text) {
 function normalizeTrade({ parsed, symbol, timeframe, mode, price }) {
   const direction = String(parsed.direction || '').toUpperCase();
   if (direction !== 'BUY' && direction !== 'SELL') {
-    throw new Error('Gemini trade JSON has an invalid direction');
+    throw new Error('OpenRouter trade JSON has an invalid direction');
   }
 
   const fields = ['entry', 'stopLoss', 'tp1', 'tp2', 'tp3', 'lotSize', 'breakEven', 'confidence'];
   const numericValues = Object.fromEntries(fields.map((field) => [field, Number(parsed[field])]));
   const invalidField = fields.find((field) => !Number.isFinite(numericValues[field]));
   if (invalidField) {
-    throw new Error(`Gemini trade JSON has an invalid ${invalidField} value`);
+    throw new Error(`OpenRouter trade JSON has an invalid ${invalidField} value`);
   }
 
   return {
