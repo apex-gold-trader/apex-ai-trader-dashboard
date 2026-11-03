@@ -3,8 +3,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  // وضع المفتاح الصريح مباشرة لتجاوز خطأ عدم إعداد متغيرات البيئة على Vercel
-  const apiKey = "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;
+  // استخدام المفتاح الجديد النظيف والموثق
+  const apiKey = "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";
 
   let body;
   try {
@@ -143,4 +143,4 @@ function normalizeTrade({ parsed, symbol, timeframe, mode, price }) {
     strategy: mode === 'scalp' ? 'سكالبينغ فوري 1m' : 'تحليل فني متوازن',
     marketPrice: price,
   };
-}
+                      }
