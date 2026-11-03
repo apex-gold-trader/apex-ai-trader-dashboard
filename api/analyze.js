@@ -3,10 +3,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
-  if (!apiKey) {
-    return res.status(500).json({ success: false, error: 'OPENROUTER_API_KEY is not configured on the server' });
-  }
+  const apiKey = "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";
 
   let body;
   try {
