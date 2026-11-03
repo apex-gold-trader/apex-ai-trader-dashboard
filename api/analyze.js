@@ -4,7 +4,7 @@ export default async function handler(req, res) {
   }
 
   // استخدام المفتاح الجديد النظيف والموثق
-  const apiKey = "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";
+  const apiKey = "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";
 
   let body;
   try {
