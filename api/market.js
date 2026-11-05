@@ -1,111 +1,64 @@
+const SYMBOLS = {
+  XAUUSD: { yahoo: 'GC=F', label: 'Gold futures (GC=F)' },
+  BTCUSD: { yahoo: 'BTC-USD', label: 'Bitcoin' },
+  EURUSD: { yahoo: 'EURUSD=X', label: 'EUR/USD' },
+  ETHUSD: { yahoo: 'ETH-USD', label: 'Ethereum' },
+  NAS100: { yahoo: '^NDX', label: 'Nasdaq 100' },
+};
+const INTERVAL_MS = { 1: 60_000, 5: 300_000, 15: 900_000 };
+
 export default async function handler(req, res) {
+  if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' });
+  const requested = String(req.query?.symbols || 'all').toUpperCase();
+  const symbols = requested === 'ALL' ? Object.keys(SYMBOLS) : requested.split(',').map((item) => item.trim());
+  if (!symbols.length || symbols.some((symbol) => !SYMBOLS[symbol])) {
+    return res.status(400).json({ success: false, error: 'Unsupported symbol. Use XAUUSD, BTCUSD, EURUSD, ETHUSD, or NAS100.' });
+  }
   try {
-    const { symbols = 'all' } = req.query || {};
-    const requested = String(symbols).toLowerCase();
-
-    const targetSymbols = requested === 'all'
-      ? ['XAUUSD', 'BTCUSD', 'EURUSD', 'ETHUSD', 'NAS100']
-      : [String(symbols).toUpperCase()];
-
-    const results = {};
-    for (const symbol of targetSymbols) {
-      const price = await fetchLivePrice(symbol);
-      results[symbol] = {
-        symbol,
-        price,
-        change: calculateChange(symbol, price),
-        lastUpdated: Date.now(),
-      };
-    }
-
-    return res.status(200).json({
-      success: true,
-      timestamp: Date.now(),
-      data: results,
-    });
+    const entries = await Promise.all(symbols.map(async (symbol) => [symbol, await fetchMarket(symbol)]));
+    return res.status(200).json({ success: true, source: 'Yahoo Finance chart (availability/delay varies)', timestamp: Date.now(), data: Object.fromEntries(entries) });
   } catch (error) {
-    return res.status(200).json({
-      success: false,
-      error: error?.message || 'Unable to fetch live prices',
-      data: {},
-    });
+    return res.status(502).json({ success: false, error: error?.message || 'Unable to load market candles', data: {} });
   }
 }
 
-async function fetchLivePrice(symbol) {
-  const source = [
-    () => fetchXauPrice(symbol),
-    () => fetchCryptoPrice(symbol),
-    () => fetchFxPrice(symbol),
-    () => fetchNasdaqPrice(symbol),
-  ];
+async function fetchMarket(symbol) {
+  const now = Math.floor(Date.now() / 1000);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(SYMBOLS[symbol].yahoo)}?period1=${now - 5 * 86400}&period2=${now}&interval=1m&events=history`;
+  const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`${symbol} price provider returned HTTP ${response.status}`);
+  const payload = await response.json();
+  const result = payload?.chart?.result?.[0];
+  if (!result) throw new Error(payload?.chart?.error?.description || `No recent candles for ${symbol}`);
+  const timestamps = result.timestamp || [];
+  const quote = result.indicators?.quote?.[0] || {};
+  const candles = timestamps.map((time, index) => ({
+    time: time * 1000,
+    open: Number(quote.open?.[index]), high: Number(quote.high?.[index]), low: Number(quote.low?.[index]),
+    close: Number(quote.close?.[index]), volume: Number(quote.volume?.[index] || 0),
+  })).filter(validCandle).sort((a, b) => a.time - b.time);
+  if (candles.length < 50) throw new Error(`Not enough recent 1-minute candles for ${symbol}`);
+  const price = candles.at(-1).close;
+  const prior = candles[Math.max(0, candles.length - 390)]?.close || candles[0].open;
+  return {
+    symbol, price, change: prior ? Number(((price - prior) / prior * 100).toFixed(3)) : 0,
+    source: SYMBOLS[symbol].label, updatedAt: candles.at(-1).time,
+    candles: { '1m': candles.slice(-1500), '5m': aggregate(candles, 5), '15m': aggregate(candles, 15) },
+  };
+}
 
-  for (const candidate of source) {
-    try {
-      const value = await candidate();
-      if (Number.isFinite(value) && value > 0) {
-        return Number(value);
-      }
-    } catch {
-      // keep trying the next source
-    }
+function validCandle(c) {
+  return Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((n) => Number.isFinite(n) && n > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close);
+}
+
+function aggregate(candles, minutes) {
+  const bucketMs = INTERVAL_MS[minutes];
+  const buckets = new Map();
+  for (const candle of candles) {
+    const bucket = Math.floor(candle.time / bucketMs) * bucketMs;
+    const bar = buckets.get(bucket);
+    if (!bar) buckets.set(bucket, { time: bucket, open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume });
+    else { bar.high = Math.max(bar.high, candle.high); bar.low = Math.min(bar.low, candle.low); bar.close = candle.close; bar.volume += candle.volume; }
   }
-
-  const defaults = {
-    XAUUSD: 2346.42,
-    BTCUSD: 67740.12,
-    EURUSD: 1.0884,
-    ETHUSD: 3592.77,
-    NAS100: 19036.2,
-  };
-  return defaults[symbol] ?? 0;
-}
-
-async function fetchXauPrice(symbol) {
-  if (symbol !== 'XAUUSD') return null;
-  const response = await fetch('https://api.gold-api.com/price/XAU', { headers: { Accept: 'application/json' } });
-  if (!response.ok) return null;
-  const data = await response.json();
-  return Number(data?.price ?? 0);
-}
-
-async function fetchCryptoPrice(symbol) {
-  const mapping = { BTCUSD: 'BTCUSDT', ETHUSD: 'ETHUSDT' };
-  const pair = mapping[symbol];
-  if (!pair) return null;
-
-  const response = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${pair}`);
-  if (!response.ok) return null;
-  const data = await response.json();
-  return Number(data?.price ?? 0);
-}
-
-async function fetchFxPrice(symbol) {
-  if (symbol !== 'EURUSD') return null;
-  const response = await fetch('https://api.frankfurter.app/latest?from=USD&to=EUR');
-  if (!response.ok) return null;
-  const data = await response.json();
-  const rate = Number(data?.rates?.EUR ?? 0);
-  return rate > 0 ? 1 / rate : null;
-}
-
-async function fetchNasdaqPrice(symbol) {
-  if (symbol !== 'NAS100') return null;
-  const response = await fetch('https://query1.finance.yahoo.com/v8/finance/chart/^IXIC?interval=1m&range=1d');
-  if (!response.ok) return null;
-  const data = await response.json();
-  return Number(data?.chart?.result?.[0]?.meta?.regularMarketPrice ?? 0);
-}
-
-function calculateChange(symbol, price) {
-  if (!Number.isFinite(Number(price)) || Number(price) <= 0) return 0;
-  const defaults = {
-    XAUUSD: 2346.42,
-    BTCUSD: 67740.12,
-    EURUSD: 1.0884,
-    ETHUSD: 3592.77,
-    NAS100: 19036.2,
-  };
-  const base = Number(defaults[symbol] ?? price);
-  return Number((((price - base) / base) * 100).toFixed(3));
+  return [...buckets.values()].slice(-600);
 }
