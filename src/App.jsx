@@ -1,19 +1,70 @@
 import { useEffect, useMemo, useState } from 'react';
 import './trading.css';
-const SYMBOLS=['XAUUSD','BTCUSD','EURUSD','ETHUSD','NAS100'];
-const LABELS={XAUUSD:'الذهب',BTCUSD:'بيتكوين',EURUSD:'اليورو/الدولار',ETHUSD:'إيثيريوم',NAS100:'ناسداك 100'};
-const STORE='apex-ai-trader-signals-v1';
-const money=(value,symbol)=>Number.isFinite(Number(value))?`${symbol==='EURUSD'?'':'$'}${Number(value).toLocaleString('en-US',{minimumFractionDigits:symbol==='EURUSD'?5:2,maximumFractionDigits:symbol==='EURUSD'?5:2})}`:'—';
-export default function App(){
- const [symbol,setSymbol]=useState('XAUUSD'),[mode,setMode]=useState('standard'),[timeframe,setTimeframe]=useState('5m'),[market,setMarket]=useState(null),[marketError,setMarketError]=useState(''),[result,setResult]=useState(null),[busy,setBusy]=useState(false),[quoteHistory,setQuoteHistory]=useState([]),[signals,setSignals]=useState(()=>{try{return JSON.parse(localStorage.getItem(STORE)||'[]')}catch{return[]}});
- useEffect(()=>{let alive=true;const refresh=async()=>{try{const r=await fetch(`/api/market?symbols=${symbol}`,{cache:'no-store'}),d=await r.json();if(!r.ok||!d.success)throw Error(d.error||'تعذر تحميل بيانات السوق');if(alive){const quote=d.data[symbol];setMarket(quote);setMarketError('');if(Number(quote?.price)>0)setQuoteHistory(old=>[...old,{time:Number(quote.updatedAt||Date.now()),price:Number(quote.price)}].filter((x,i,a)=>i===0||x.time>a[i-1].time).slice(-20));}}catch(e){if(alive){setMarket(null);setMarketError(e.message)}}};refresh();const id=setInterval(refresh,15000);return()=>{alive=false;clearInterval(id)}},[symbol]);
- useEffect(()=>{localStorage.setItem(STORE,JSON.stringify(signals))},[signals]);useEffect(()=>{setResult(null);setQuoteHistory([])},[symbol,mode,timeframe]);
- const analyze=async()=>{if(!market||!Number.isFinite(Number(market.price))||!market.updatedAt){setMarketError('لا يوجد سعر spot حديث؛ أعد المحاولة بعد تحديث السوق.');return}setBusy(true);setMarketError('');setResult(null);try{const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,mode,timeframe,candles:market.candles,livePrice:market.price,quoteUpdatedAt:market.updatedAt,quoteHistory})}),d=await r.json();if(!r.ok||!d.success)throw Error(d.error||'تعذر التحليل');setResult(d);if(d.approved&&d.trade)setSignals(old=>[{id:`${Date.now()}`,symbol,direction:d.trade.direction,entry:d.trade.entry,status:'open',score:d.score,createdAt:new Date().toLocaleString()},...old].slice(0,30))}catch(e){setMarketError(e.message)}finally{setBusy(false)}};
- const outcome=(id,status)=>setSignals(items=>items.map(x=>x.id===id?{...x,status}:x)),wins=useMemo(()=>signals.filter(s=>['win1','win2','win3'].includes(s.status)).length,[signals]),closed=useMemo(()=>signals.filter(s=>s.status!=='open').length,[signals]);
- return <div className="app-shell" dir="rtl"><header className="topbar"><div><p className="eyebrow">محرك تحليل spot</p><h1>Apex AI Trader</h1><p className="muted">المعاينة الاصطناعية منفصلة بوضوح عن إشارات OHLC الحقيقية</p></div><div className="status-pill"><span className="live-dot"/>{market?`${market.source} • ${new Date(market.updatedAt).toLocaleTimeString()}`:'بانتظار بيانات'}</div></header>
- <section className="controls panel"><label>الأصل<select value={symbol} onChange={e=>setSymbol(e.target.value)}>{SYMBOLS.map(s=><option key={s}>{s}</option>)}</select></label><label>النمط<select value={mode} onChange={e=>setMode(e.target.value)}><option value="standard">تحليل متوازن</option><option value="scalp">سكالبينغ M1</option></select></label><label>فريم الإشارة<select value={timeframe} onChange={e=>setTimeframe(e.target.value)}><option value="1m">M1</option><option value="5m">M5</option><option value="15m">M15</option></select></label><button className="analyze-btn" disabled={busy||!market} onClick={analyze}>{busy?'جار التحليل…':'حلل السوق'}</button></section>
- {marketError&&<p className="notice error">{marketError}</p>}{market?.note&&<p className="notice">{market.note}</p>}
- <section className="market-strip panel"><div><span>الأصل</span><strong>{LABELS[symbol]} ({symbol})</strong></div><div><span>السعر الفوري الحالي</span><strong>{money(market?.price,symbol)}</strong></div><div><span>مصدر التسعير</span><strong>{market?.source||'—'}</strong></div><div><span>آخر تحديث</span><strong>{market?.updatedAt?new Date(market.updatedAt).toLocaleTimeString():'—'}</strong></div></section>
- {result&&<section className="result panel"><div className="result-heading"><div><p className="eyebrow">{result.dataMode==='SYNTHETIC_PREVIEW_NOT_MARKET_DATA'?'معاينة مؤشرات اصطناعية — ليست بيانات سوق':'نتيجة التحليل'}</p><h2 className={result.candidateDirection==='BUY'?'up':result.candidateDirection==='SELL'?'down':''}>{result.dataMode==='SYNTHETIC_PREVIEW_NOT_MARKET_DATA'?`اتجاه افتراضي فقط: ${result.candidateDirection}`:result.signal==='WAIT'?'انتظار — لا توجد صفقة':`${result.signal} • ${LABELS[symbol]}`}</h2></div><strong className="score">{result.score}<small>/100</small></strong></div>{result.dataMode==='SYNTHETIC_PREVIEW_NOT_MARKET_DATA'&&<p className="notice error">محاكاة تعليمية فقط: هذه المؤشرات والنقاط لا تقيس السوق الحقيقي ولا تنتج توصية تداول. مستويات المعاينة غير صالحة للتنفيذ.</p>}<div className="progress"><span style={{width:`${result.score}%`}}/></div><p className="muted">السعر الفوري المستخدم: {money(result.marketPrice,symbol)} • الحالة: {result.marketRegime} • حد الإشارة الحقيقية: {result.scoreThreshold}</p>{result.simulatedLevels&&<div className="trade-grid">{[['دخول افتراضي',result.simulatedLevels.entry],['وقف افتراضي',result.simulatedLevels.stopLoss],['هدف افتراضي 1',result.simulatedLevels.tp1],['هدف افتراضي 2',result.simulatedLevels.tp2],['هدف افتراضي 3',result.simulatedLevels.tp3]].map(([label,value])=><div className="metric" key={label}><span>{label}</span><strong>{money(value,symbol)}</strong></div>)}</div>}{result.trade&&<div className="trade-grid">{[['دخول',result.trade.entry],['وقف الخسارة',result.trade.stopLoss],['TP1',result.trade.tp1],['TP2',result.trade.tp2],['TP3',result.trade.tp3]].map(([label,value])=><div className="metric" key={label}><span>{label}</span><strong>{money(value,symbol)}</strong></div>)}</div>}{result.indicators&&<><h3>مؤشرات الإطارات</h3><div className="timeframe-grid">{Object.entries(result.indicators).map(([tf,info])=><article className="metric" key={tf}><h3>{tf}</h3>{Object.entries(info).map(([k,v])=><p key={k}><span>{k}</span><strong>{String(v)}</strong></p>)}</article>)}</div></>}<h3>الأسباب والقيود</h3><ul className="reasons">{result.reasons.map((r,i)=><li key={i}>{r}</li>)}</ul><p className="notice">{result.riskNotice}</p></section>}
- <section className="panel history"><div className="result-heading"><h2>سجل الإشارات الحقيقية</h2><span>نسبة الفوز بعد الإغلاق: {closed?(wins/closed*100).toFixed(1)+'%':'—'}</span></div>{signals.length?signals.map(s=><div className="history-row" key={s.id}><strong>{LABELS[s.symbol]} • {s.direction}</strong><span>{money(s.entry,s.symbol)} • {s.score}/100</span><div>{['win1','win2','win3','loss'].map(x=><button className="small-btn" key={x} onClick={()=>outcome(s.id,x)}>{x==='loss'?'خسارة':`ربح ${x.slice(-1)}`}</button>)}</div></div>):<p className="muted">لا توجد إشارات معتمدة بعد.</p>}</section><footer className="disclaimer">عند غياب OHLC الحقيقي يولد المحرك شموعاً اصطناعية لأغراض معاينة المؤشرات فقط. لا تُعتمد إشارات أو صفقات من هذه المحاكاة، ولا تمثل قياساً دقيقاً أو توقعاً موثوقاً للسوق. للحصول على BUY/SELL حقيقية، يلزم بيانات OHLC فعلية من مزود يدعم الأصل. لا يوجد تنفيذ وسيط ولا ضمان للتطابق أو الربح.</footer></div>
+
+const SYMBOLS = ['XAUUSD', 'BTCUSD', 'EURUSD', 'ETHUSD', 'NAS100'];
+const LABELS = { XAUUSD: 'الذهب', BTCUSD: 'بيتكوين', EURUSD: 'اليورو/الدولار', ETHUSD: 'إيثيريوم', NAS100: 'ناسداك 100' };
+const TV_SYMBOLS = { XAUUSD: 'OANDA:XAUUSD', BTCUSD: 'BINANCE:BTCUSDT', EURUSD: 'OANDA:EURUSD', ETHUSD: 'BINANCE:ETHUSDT', NAS100: 'NASDAQ:NDX' };
+const STORE = 'apex-ai-trader-signals-v1';
+const money = (value, symbol) => Number.isFinite(Number(value)) ? `${symbol === 'EURUSD' ? '' : '$'}${Number(value).toLocaleString('en-US', { minimumFractionDigits: symbol === 'EURUSD' ? 5 : 2, maximumFractionDigits: symbol === 'EURUSD' ? 5 : 2 })}` : '—';
+
+function TradingViewChart({ symbol, timeframe }) {
+  const interval = { '1m': '1', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '4h': '240' }[timeframe] || '5';
+  const params = new URLSearchParams({ symbol: TV_SYMBOLS[symbol], interval, theme: 'dark', style: '1', locale: 'en', toolbarbg: '#0d1926', enable_publishing: 'false', hide_top_toolbar: 'false', hide_legend: 'false', save_image: 'false', withdateranges: 'true', allow_symbol_change: 'false', details: 'false', hotlist: 'false', calendar: 'false', studies: 'EMA@tv-basicstudies,RSI@tv-basicstudies,Volume@tv-basicstudies' });
+  return <div className="tv-chart"><iframe title={`TradingView live chart ${symbol}`} src={`https://www.tradingview.com/widgetembed/?${params}`} loading="lazy" allow="clipboard-write; fullscreen" referrerPolicy="origin" /></div>;
+}
+
+export default function App() {
+  const [symbol, setSymbol] = useState('XAUUSD');
+  const [mode, setMode] = useState('standard');
+  const [timeframe, setTimeframe] = useState('5m');
+  const [market, setMarket] = useState(null);
+  const [marketError, setMarketError] = useState('');
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [signals, setSignals] = useState(() => { try { return JSON.parse(localStorage.getItem(STORE) || '[]'); } catch { return []; } });
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`/api/market?symbols=${symbol}`, { cache: 'no-store' });
+        const payload = await response.json();
+        if (!response.ok || !payload.success) throw new Error(payload.error || 'تعذر تحميل بيانات السوق');
+        if (active) { setMarket(payload.data[symbol]); setMarketError(''); }
+      } catch (error) { if (active) { setMarket(null); setMarketError(error.message); } }
+    };
+    refresh(); const timer = setInterval(refresh, 15_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [symbol]);
+  useEffect(() => { localStorage.setItem(STORE, JSON.stringify(signals)); }, [signals]);
+  useEffect(() => { setResult(null); }, [symbol, mode, timeframe]);
+
+  const analyze = async () => {
+    if (!market || !Number.isFinite(Number(market.price)) || !market.updatedAt) { setMarketError('لا يوجد سعر سوق حديث.'); return; }
+    setBusy(true); setMarketError(''); setResult(null);
+    try {
+      const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol, mode, timeframe, candles: market.candles, livePrice: market.price, quoteUpdatedAt: market.updatedAt }) });
+      const payload = await response.json();
+      if (!response.ok || !payload.success) throw new Error(payload.error || 'تعذر التحليل');
+      setResult(payload);
+      if (payload.approved && payload.trade) setSignals((old) => [{ id: `${Date.now()}`, symbol, direction: payload.trade.direction, entry: payload.trade.entry, status: 'open', score: payload.score, createdAt: new Date().toLocaleString() }, ...old].slice(0, 30));
+    } catch (error) { setMarketError(error.message); }
+    finally { setBusy(false); }
+  };
+  const outcome = (id, status) => setSignals((items) => items.map((item) => item.id === id ? { ...item, status } : item));
+  const wins = useMemo(() => signals.filter((item) => ['win1', 'win2', 'win3'].includes(item.status)).length, [signals]);
+  const closed = useMemo(() => signals.filter((item) => item.status !== 'open').length, [signals]);
+
+  return <div className="app-shell" dir="rtl">
+    <header className="topbar"><div><p className="eyebrow">Apex AI Trader</p><h1>لوحة السوق والتحليل</h1><p className="muted">شارت تفاعلي • التحليل الآلي يعتمد حصراً على OHLC الحقيقي المتاح</p></div><div className="status-pill"><span className="live-dot" />{market ? `${market.source} • ${new Date(market.updatedAt).toLocaleTimeString()}` : 'بانتظار بيانات السوق'}</div></header>
+    <section className="notice error prominent-warning"><strong>تنبيه مخاطر البيانات:</strong> الشارت من TradingView ومصدره قد يختلف عن مزود السعر والتحليل أو وسيط MT5. لا يتم إصدار BUY/SELL دون شموع OHLC حقيقية حديثة. لا يضمن أي مصدر مجاني التزامن الفوري أو تطابق الأسعار.</section>
+    <section className="controls panel"><label>الأصل<select value={symbol} onChange={(event) => setSymbol(event.target.value)}>{SYMBOLS.map((item) => <option key={item} value={item}>{LABELS[item]} ({item})</option>)}</select></label><label>النمط<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="standard">تحليل متوازن</option><option value="scalp">سكالبينغ M1</option></select></label><label>فريم الشارت<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}>{[['1m','M1'],['5m','M5'],['15m','M15'],['30m','M30'],['1h','H1'],['4h','H4']].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label><button className="analyze-btn" disabled={busy || !market} onClick={analyze}>{busy ? 'جارٍ التحليل…' : 'حلل السوق'}</button></section>
+    {marketError && <p className="notice error">{marketError}</p>}
+    {market?.note && <p className="notice">{market.note}</p>}
+    <section className="market-strip panel"><div><span>الأصل</span><strong>{LABELS[symbol]} ({symbol})</strong></div><div><span>السعر</span><strong>{money(market?.price, symbol)}</strong></div><div><span>مصدر التحليل</span><strong>{market?.source || '—'}</strong></div><div><span>آخر تحديث بيانات</span><strong>{market?.updatedAt ? new Date(market.updatedAt).toLocaleTimeString() : '—'}</strong></div><div><span>OHLC حقيقي</span><strong>{market?.tradableAnalysis ? 'متاح' : 'غير متاح — التحليل WAIT'}</strong></div></section>
+    <section className="panel chart-panel"><div className="result-heading"><div><p className="eyebrow">TradingView Advanced Chart</p><h2>{LABELS[symbol]} • {symbol}</h2></div><span className="muted">المخطط يوفر عرضاً بصرياً؛ لا يغذي التحليل تلقائياً</span></div><TradingViewChart symbol={symbol} timeframe={timeframe} /><p className="muted">قد تكون بيانات TradingView متأخرة أو تختلف حسب الرمز ومزود الوسيط. إعدادات المؤشرات في الشارت مستقلة عن محرك الإشارات.</p></section>
+    {result && <section className="result panel"><div className="result-heading"><div><p className="eyebrow">نتيجة التحليل</p><h2 className={result.signal === 'BUY' ? 'up' : result.signal === 'SELL' ? 'down' : ''}>{result.signal === 'WAIT' ? 'انتظار — لا توجد صفقة' : `${result.signal} • ${LABELS[symbol]}`}</h2></div><strong className="score">{Number.isFinite(result.score) ? `${result.score}/100` : '—'}</strong></div><p className="muted">السعر المستخدم: {money(result.marketPrice, symbol)} • الحالة: {result.marketRegime}</p>{result.trade && <div className="trade-grid">{[['دخول',result.trade.entry],['وقف الخسارة',result.trade.stopLoss],['TP1',result.trade.tp1],['TP2',result.trade.tp2],['TP3',result.trade.tp3]].map(([label,value]) => <div className="metric" key={label}><span>{label}</span><strong>{money(value,symbol)}</strong></div>)}</div>}{result.indicators && <><h3>مؤشرات الفريمات</h3><div className="timeframe-grid">{Object.entries(result.indicators).map(([tf,values]) => <article className="metric" key={tf}><h3>{tf}</h3>{Object.entries(values).map(([key,value]) => <p key={key}><span>{key}</span><strong>{String(value)}</strong></p>)}</article>)}</div></>}<ul className="reasons">{(result.reasons || []).map((reason,index) => <li key={index}>{reason}</li>)}</ul><p className="notice">{result.riskNotice}</p></section>}
+    <section className="panel history"><div className="result-heading"><h2>سجل الإشارات</h2><span>نسبة الفوز بعد الإغلاق: {closed ? `${(wins / closed * 100).toFixed(1)}%` : '—'}</span></div>{signals.length ? signals.map((item) => <div className="history-row" key={item.id}><strong>{LABELS[item.symbol]} • {item.direction}</strong><span>{money(item.entry,item.symbol)} • {item.score}/100</span><div>{['win1','win2','win3','loss'].map((state) => <button className="small-btn" key={state} onClick={() => outcome(item.id,state)}>{state === 'loss' ? 'خسارة' : `ربح ${state.slice(-1)}`}</button>)}</div></div>) : <p className="muted">لا توجد إشارات معتمدة.</p>}</section>
+    <footer className="disclaimer">TradingView مضمّن للعرض التفاعلي فقط. لا يستطيع هذا الـwidget تمرير شموعه إلى الخادم. التحليل الآلي يستخدم OHLC الذي يجلبه api/market.js؛ حالياً الذهب عبر المصد�� المجاني يوفر سعراً استرشادياً دون candles، ويتطلب Twelve Data مفتاحاً وخطة/صلاحية مناسبة لتوفير شموعه. إذا لم تصل بيانات حقيقية مكتملة وحديثة فالحالة WAIT. لا يوجد تنفيذ وسيط ولا ضمان للتطابق أو الربح.</footer>
+  </div>;
 }
