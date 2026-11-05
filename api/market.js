@@ -1,64 +1,75 @@
 const SYMBOLS = {
-  XAUUSD: { yahoo: 'GC=F', label: 'Gold futures (GC=F)' },
-  BTCUSD: { yahoo: 'BTC-USD', label: 'Bitcoin' },
-  EURUSD: { yahoo: 'EURUSD=X', label: 'EUR/USD' },
-  ETHUSD: { yahoo: 'ETH-USD', label: 'Ethereum' },
-  NAS100: { yahoo: '^NDX', label: 'Nasdaq 100' },
+  XAUUSD: { twelveData: 'XAU/USD' },
+  BTCUSD: { twelveData: 'BTC/USD', binance: 'BTCUSDT' },
+  EURUSD: { twelveData: 'EUR/USD' },
+  ETHUSD: { twelveData: 'ETH/USD', binance: 'ETHUSDT' },
+  NAS100: { twelveData: 'NDX' },
 };
-const INTERVAL_MS = { 1: 60_000, 5: 300_000, 15: 900_000 };
+const INTERVAL = { '1m': 60_000, '5m': 300_000, '15m': 900_000 };
+const MAX_AGE_MS = 3 * 60_000;
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'Method not allowed' });
   const requested = String(req.query?.symbols || 'all').toUpperCase();
   const symbols = requested === 'ALL' ? Object.keys(SYMBOLS) : requested.split(',').map((item) => item.trim());
-  if (!symbols.length || symbols.some((symbol) => !SYMBOLS[symbol])) {
-    return res.status(400).json({ success: false, error: 'Unsupported symbol. Use XAUUSD, BTCUSD, EURUSD, ETHUSD, or NAS100.' });
-  }
+  if (!symbols.length || symbols.some((symbol) => !SYMBOLS[symbol])) return res.status(400).json({ success: false, error: 'Unsupported symbol.' });
   try {
     const entries = await Promise.all(symbols.map(async (symbol) => [symbol, await fetchMarket(symbol)]));
-    return res.status(200).json({ success: true, source: 'Yahoo Finance chart (availability/delay varies)', timestamp: Date.now(), data: Object.fromEntries(entries) });
+    return res.status(200).json({ success: true, timestamp: Date.now(), data: Object.fromEntries(entries) });
   } catch (error) {
-    return res.status(502).json({ success: false, error: error?.message || 'Unable to load market candles', data: {} });
+    return res.status(503).json({ success: false, error: error?.message || 'Live market data unavailable; no substitute price was used.', data: {} });
   }
 }
 
 async function fetchMarket(symbol) {
-  const now = Math.floor(Date.now() / 1000);
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(SYMBOLS[symbol].yahoo)}?period1=${now - 5 * 86400}&period2=${now}&interval=1m&events=history`;
-  const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000) });
-  if (!response.ok) throw new Error(`${symbol} price provider returned HTTP ${response.status}`);
-  const payload = await response.json();
-  const result = payload?.chart?.result?.[0];
-  if (!result) throw new Error(payload?.chart?.error?.description || `No recent candles for ${symbol}`);
-  const timestamps = result.timestamp || [];
-  const quote = result.indicators?.quote?.[0] || {};
-  const candles = timestamps.map((time, index) => ({
-    time: time * 1000,
-    open: Number(quote.open?.[index]), high: Number(quote.high?.[index]), low: Number(quote.low?.[index]),
-    close: Number(quote.close?.[index]), volume: Number(quote.volume?.[index] || 0),
-  })).filter(validCandle).sort((a, b) => a.time - b.time);
-  if (candles.length < 50) throw new Error(`Not enough recent 1-minute candles for ${symbol}`);
-  const price = candles.at(-1).close;
-  const prior = candles[Math.max(0, candles.length - 390)]?.close || candles[0].open;
-  return {
-    symbol, price, change: prior ? Number(((price - prior) / prior * 100).toFixed(3)) : 0,
-    source: SYMBOLS[symbol].label, updatedAt: candles.at(-1).time,
-    candles: { '1m': candles.slice(-1500), '5m': aggregate(candles, 5), '15m': aggregate(candles, 15) },
-  };
+  // Twelve Data supports synchronized spot OHLC for all configured assets, but requires
+  // the operator's key and the relevant market-data entitlement. Never claim zero delay.
+  const key = String(process.env.TWELVE_DATA_API_KEY || '').trim();
+  if (key) return fetchTwelveData(symbol, key);
+  if (symbol === 'XAUUSD') return fetchXauSpot();
+  if (SYMBOLS[symbol].binance) return fetchBinance(symbol);
+  throw new Error(`${symbol} requires TWELVE_DATA_API_KEY for supported spot data. No delayed or futures proxy is substituted.`);
 }
 
-function validCandle(c) {
-  return Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((n) => Number.isFinite(n) && n > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close);
+async function fetchXauSpot() {
+  const response = await fetch('https://xaus.com/api/v1/spot?compact=1', { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000), cache: 'no-store' });
+  if (!response.ok) throw new Error(`XAUS spot provider returned HTTP ${response.status}`);
+  const data = await response.json();
+  const price = Number(data.spot_usd_oz ?? data.xau?.price);
+  const updatedAt = Date.parse(data.data_state?.as_of || data.updated_at || '');
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(updatedAt)) throw new Error('XAUS returned an invalid spot quote; refusing fallback prices.');
+  if (data.data_state?.status !== 'fresh' || Date.now() - updatedAt > MAX_AGE_MS) throw new Error(`XAU/USD spot quote is stale or unavailable (${data.data_state?.status || 'unknown'}); no trade data served.`);
+  return { symbol: 'XAUUSD', price, change: null, source: 'XAUS indicative XAU/USD spot', updatedAt, freshness: 'fresh', candles: null, candleInterval: null, tradableAnalysis: false, note: 'Spot quote only. This free source does not provide 1-minute candles; configure Twelve Data for candle-based analysis.' };
 }
 
+async function fetchBinance(symbol) {
+  const pair = SYMBOLS[symbol].binance;
+  const response = await fetch(`https://api.binance.com/api/v3/klines?symbol=${pair}&interval=1m&limit=1000`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000), cache: 'no-store' });
+  if (!response.ok) throw new Error(`Binance ${symbol} provider returned HTTP ${response.status}`);
+  const rows = await response.json();
+  const candles = rows.map((r) => ({ time: Number(r[0]), open: Number(r[1]), high: Number(r[2]), low: Number(r[3]), close: Number(r[4]), volume: Number(r[5]), closeTime: Number(r[6]) })).filter((c) => validCandle(c) && c.closeTime < Date.now());
+  if (candles.length < 205) throw new Error(`Insufficient fresh Binance candles for ${symbol}.`);
+  const last = candles.at(-1), updatedAt = last.closeTime;
+  assertFresh(updatedAt, symbol);
+  return { symbol, price: last.close, change: null, source: `Binance spot (${pair})`, updatedAt, freshness: 'fresh', candles: { '1m': candles.map(({ closeTime, ...c }) => c), '5m': aggregate(candles, 5), '15m': aggregate(candles, 15) }, candleInterval: '1m', tradableAnalysis: true };
+}
+
+async function fetchTwelveData(symbol, key) {
+  const params = new URLSearchParams({ symbol: SYMBOLS[symbol].twelveData, interval: '1min', outputsize: '1500', apikey: key, order: 'ASC' });
+  const response = await fetch(`https://api.twelvedata.com/time_series?${params}`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000), cache: 'no-store' });
+  const data = await response.json();
+  if (!response.ok || data.status === 'error' || !Array.isArray(data.values)) throw new Error(data.message || `Twelve Data cannot provide ${symbol} 1-minute spot candles.`);
+  const candles = data.values.map((r) => ({ time: Date.parse(`${r.datetime.replace(' ', 'T')}Z`), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume) || 0 })).filter(validCandle).sort((a, b) => a.time - b.time);
+  if (candles.length < 205) throw new Error(`Insufficient Twelve Data 1-minute candles for ${symbol}.`);
+  const last = candles.at(-1), updatedAt = last.time + INTERVAL['1m'];
+  assertFresh(updatedAt, symbol);
+  return { symbol, price: last.close, change: null, source: 'Twelve Data spot OHLC (plan-dependent freshness)', updatedAt, freshness: 'provider timestamp checked', candles: { '1m': candles, '5m': aggregate(candles, 5), '15m': aggregate(candles, 15) }, candleInterval: '1m', tradableAnalysis: true };
+}
+
+function assertFresh(time, symbol) { if (!Number.isFinite(time) || Date.now() - time > MAX_AGE_MS || time > Date.now() + 30_000) throw new Error(`${symbol} quote is older than 3 minutes or has an invalid timestamp; refusing stale data.`); }
+function validCandle(c) { return Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((n) => Number.isFinite(n) && n > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close); }
 function aggregate(candles, minutes) {
-  const bucketMs = INTERVAL_MS[minutes];
-  const buckets = new Map();
-  for (const candle of candles) {
-    const bucket = Math.floor(candle.time / bucketMs) * bucketMs;
-    const bar = buckets.get(bucket);
-    if (!bar) buckets.set(bucket, { time: bucket, open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume });
-    else { bar.high = Math.max(bar.high, candle.high); bar.low = Math.min(bar.low, candle.low); bar.close = candle.close; bar.volume += candle.volume; }
-  }
-  return [...buckets.values()].slice(-600);
+  const size = INTERVAL[`${minutes}m`], map = new Map();
+  for (const c of candles) { const t = Math.floor(c.time / size) * size, bar = map.get(t); if (!bar) map.set(t, { time: t, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }); else { bar.high = Math.max(bar.high, c.high); bar.low = Math.min(bar.low, c.low); bar.close = c.close; bar.volume += c.volume; } }
+  return [...map.values()].slice(-600);
 }
