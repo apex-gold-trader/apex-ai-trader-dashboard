@@ -5,6 +5,7 @@ const SYMBOLS = ['XAUUSD', 'BTCUSD', 'EURUSD', 'ETHUSD', 'NAS100'];
 const LABELS = { XAUUSD: 'الذهب', BTCUSD: 'بيتكوين', EURUSD: 'اليورو/الدولار', ETHUSD: 'إيثيريوم', NAS100: 'ناسداك 100' };
 const TV_SYMBOLS = { XAUUSD: 'OANDA:XAUUSD', BTCUSD: 'BINANCE:BTCUSDT', EURUSD: 'OANDA:EURUSD', ETHUSD: 'BINANCE:ETHUSDT', NAS100: 'NASDAQ:NDX' };
 const STORE = 'apex-ai-trader-signals-v1';
+const MARKET_REFRESH_MS = 60_000;
 const money = (value, symbol) => Number.isFinite(Number(value)) ? `${symbol === 'EURUSD' ? '' : '$'}${Number(value).toLocaleString('en-US', { minimumFractionDigits: symbol === 'EURUSD' ? 5 : 2, maximumFractionDigits: symbol === 'EURUSD' ? 5 : 2 })}` : '—';
 
 function TradingViewChart({ symbol, timeframe }) {
@@ -33,7 +34,7 @@ export default function App() {
         if (active) { setMarket(payload.data[symbol]); setMarketError(''); }
       } catch (error) { if (active) { setMarket(null); setMarketError(error.message); } }
     };
-    refresh(); const timer = setInterval(refresh, 15_000);
+    refresh(); const timer = setInterval(refresh, MARKET_REFRESH_MS);
     return () => { active = false; clearInterval(timer); };
   }, [symbol]);
   useEffect(() => { localStorage.setItem(STORE, JSON.stringify(signals)); }, [signals]);
@@ -65,6 +66,6 @@ export default function App() {
     <section className="panel chart-panel"><div className="result-heading"><div><p className="eyebrow">TradingView Advanced Chart</p><h2>{LABELS[symbol]} • {symbol}</h2></div><span className="muted">المخطط يوفر عرضاً بصرياً؛ لا يغذي التحليل تلقائياً</span></div><TradingViewChart symbol={symbol} timeframe={timeframe} /><p className="muted">قد تكون بيانات TradingView متأخرة أو تختلف حسب الرمز ومزود الوسيط. إعدادات المؤشرات في الشارت مستقلة عن محرك الإشارات.</p></section>
     {result && <section className="result panel"><div className="result-heading"><div><p className="eyebrow">نتيجة التحليل</p><h2 className={result.signal === 'BUY' ? 'up' : result.signal === 'SELL' ? 'down' : ''}>{result.signal === 'WAIT' ? 'انتظار — لا توجد صفقة' : `${result.signal} • ${LABELS[symbol]}`}</h2></div><strong className="score">{Number.isFinite(result.score) ? `${result.score}/100` : '—'}</strong></div><p className="muted">السعر المستخدم: {money(result.marketPrice, symbol)} • الحالة: {result.marketRegime}</p>{result.trade && <div className="trade-grid">{[['دخول',result.trade.entry],['وقف الخسارة',result.trade.stopLoss],['TP1',result.trade.tp1],['TP2',result.trade.tp2],['TP3',result.trade.tp3]].map(([label,value]) => <div className="metric" key={label}><span>{label}</span><strong>{money(value,symbol)}</strong></div>)}</div>}{result.indicators && <><h3>مؤشرات الفريمات</h3><div className="timeframe-grid">{Object.entries(result.indicators).map(([tf,values]) => <article className="metric" key={tf}><h3>{tf}</h3>{Object.entries(values).map(([key,value]) => <p key={key}><span>{key}</span><strong>{String(value)}</strong></p>)}</article>)}</div></>}<ul className="reasons">{(result.reasons || []).map((reason,index) => <li key={index}>{reason}</li>)}</ul><p className="notice">{result.riskNotice}</p></section>}
     <section className="panel history"><div className="result-heading"><h2>سجل الإشارات</h2><span>نسبة الفوز بعد الإغلاق: {closed ? `${(wins / closed * 100).toFixed(1)}%` : '—'}</span></div>{signals.length ? signals.map((item) => <div className="history-row" key={item.id}><strong>{LABELS[item.symbol]} • {item.direction}</strong><span>{money(item.entry,item.symbol)} • {item.score}/100</span><div>{['win1','win2','win3','loss'].map((state) => <button className="small-btn" key={state} onClick={() => outcome(item.id,state)}>{state === 'loss' ? 'خسارة' : `ربح ${state.slice(-1)}`}</button>)}</div></div>) : <p className="muted">لا توجد إشارات معتمدة.</p>}</section>
-    <footer className="disclaimer">TradingView مضمّن للعرض التفاعلي فقط. لا يستطيع هذا الـwidget تمرير شموعه إلى الخادم. التحليل الآلي يستخدم OHLC الذي يجلبه api/market.js؛ حالياً الذهب عبر المصد�� المجاني يوفر سعراً استرشادياً دون candles، ويتطلب Twelve Data مفتاحاً وخطة/صلاحية مناسبة لتوفير شموعه. إذا لم تصل بيانات حقيقية مكتملة وحديثة فالحالة WAIT. لا يوجد تنفيذ وسيط ولا ضمان للتطابق أو الربح.</footer>
+    <footer className="disclaimer">TradingView مضمّن للعرض التفاعلي فقط. لا يستطيع هذا الـwidget تمرير شموعه إلى الخادم. التحليل الآلي يستخدم OHLC الذي يجلبه api/market.js؛ حالياً الذهب عبر المصدر المجاني يوفر سعراً استرشادياً دون candles، ويتطلب Twelve Data مفتاحاً وخطة/صلاحية مناسبة لتوفير شموعه. إذا لم تصل بيانات حقيقية مكتملة وحديثة فالحالة WAIT. لا يوجد تنفيذ وسيط ولا ضمان للتطابق أو الربح.</footer>
   </div>;
 }
