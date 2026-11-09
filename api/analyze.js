@@ -2,7 +2,8 @@ const SYMBOLS = ['XAUUSD', 'BTCUSD', 'EURUSD', 'ETHUSD', 'NAS100'];
 const TIMEFRAMES = ['1m', '5m', '15m'];
 const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SIGNAL_SCORE = 60;
-const WEIGHTS = { m15: 15, m5: 15, vwap: 10, ema: 10, sweep: 15, structure: 10, rsi: 10, adx: 5, candle: 5, atr: 5 };
+const MAX_QUOTE_AGE_MS = 180_000;
+const WEIGHTS = { higherTrend: 15, setupTrend: 15, vwap: 10, ema: 10, liquidity: 15, structure: 10, rsi: 10, adx: 5, candle: 5, volatility: 5 };
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' });
@@ -12,111 +13,158 @@ export default async function handler(req, res) {
 
   const symbol = String(body.symbol || '').toUpperCase();
   const mode = body.mode === 'scalp' ? 'scalp' : 'standard';
-  const requested = String(body.timeframe || (mode === 'scalp' ? '1m' : '5m'));
-  const timeframe = TIMEFRAMES.includes(requested) ? requested : (mode === 'scalp' ? '1m' : '5m');
+  const requestedTimeframe = String(body.timeframe || (mode === 'scalp' ? '1m' : '5m'));
+  const timeframe = TIMEFRAMES.includes(requestedTimeframe) ? requestedTimeframe : (mode === 'scalp' ? '1m' : '5m');
   const price = Number(body.livePrice);
   const quoteUpdatedAt = Number(body.quoteUpdatedAt);
   const candles = body.candles;
   if (!SYMBOLS.includes(symbol)) return res.status(400).json({ success: false, error: 'Unsupported symbol' });
 
   const quoteValid = Number.isFinite(price) && price > 0 && Number.isFinite(quoteUpdatedAt)
-    && Date.now() - quoteUpdatedAt <= 180_000 && quoteUpdatedAt <= Date.now() + 30_000;
-  if (!quoteValid) return wait(res, symbol, mode, timeframe, null, null, 'السعر الفوري غير متوفر أو قديم.');
+    && Date.now() - quoteUpdatedAt <= MAX_QUOTE_AGE_MS && quoteUpdatedAt <= Date.now() + 30_000;
+  if (!quoteValid) return waitResponse(res, symbol, mode, timeframe, null, null, 'السعر الفوري غير متوفر أو قديم.');
   if (!candles || TIMEFRAMES.some((tf) => !Array.isArray(candles[tf]) || candles[tf].length < MIN_BARS[tf])) {
-    return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'لا تتوفر شموع OHLC حقيقية مكتملة وكافية للفريمات المطلوبة.');
+    return waitResponse(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'لا تتوفر شموع OHLC حقيقية مكتملة وكافية للفريمات المطلوبة.');
   }
 
   try {
     const clean = Object.fromEntries(TIMEFRAMES.map((tf) => [tf, sanitize(candles[tf])]));
-    if (TIMEFRAMES.some((tf) => clean[tf].length < MIN_BARS[tf])) return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'الشموع المستلمة غير صالحة أو غير كافية.');
-    if (Date.now() - clean['1m'].at(-1).time > 180_000) return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'أحدث شمعة M1 قديمة؛ لا يتم إصدار إشارة.');
-    return res.status(200).json({ success: true, source: 'real spot OHLC technical analysis', ...analyze(symbol, mode, timeframe, price, clean, quoteUpdatedAt) });
+    if (TIMEFRAMES.some((tf) => clean[tf].length < MIN_BARS[tf])) return waitResponse(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'الشموع المستلمة غير صالحة أو غير كافية.');
+    const newestMinute = clean['1m'].at(-1).time;
+    if (Date.now() - newestMinute > MAX_QUOTE_AGE_MS) return waitResponse(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'أحدث شمعة M1 قديمة؛ لا يتم إصدار إشارة.');
+    return res.status(200).json({ success: true, source: 'real spot OHLC technical analysis', ...analyze({ symbol, mode, timeframe, price, quoteUpdatedAt, candles: clean }) });
   } catch (error) {
     return res.status(422).json({ success: false, error: error.message || 'Analysis failed' });
   }
 }
 
-function wait(res, symbol, mode, timeframe, price, updatedAt, reason) {
-  return res.status(200).json({ success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SIGNAL_SCORE, symbol, mode, timeframe, selectedTimeframe: timeframe, marketPrice: price, quoteUpdatedAt: updatedAt, marketRegime: 'غير محدد — بيانات حقيقية غير كافية', dataMode: 'NO_SIGNAL', trade: null, reasons: [reason, 'لا يتم توليد شموع أو نقاط اصطناعية.'], riskNotice: 'WAIT: لا توجد توصية تداول حتى تتوفر بيانات OHLC حقيقية وحديثة.' });
+function waitResponse(res, symbol, mode, timeframe, price, quoteUpdatedAt, reason) {
+  return res.status(200).json({
+    success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SIGNAL_SCORE,
+    symbol, mode, timeframe, selectedTimeframe: timeframe, marketPrice: price, quoteUpdatedAt,
+    marketRegime: 'غير محدد — بيانات حقيقية غير كافية', dataMode: 'NO_SIGNAL', trade: null,
+    reasons: [reason, 'لا يتم إنشاء شموع أو نقاط اصطناعية.'],
+    riskNotice: 'WAIT: لا توجد توصية حتى تتوفر بيانات OHLC حقيقية وحديثة.',
+  });
 }
 
 function sanitize(items) {
-  return items.slice(-2000).map((c) => ({ time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Number(c.volume) || 0 }))
-    .filter((c) => Number.isFinite(c.time) && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
-    .sort((a, b) => a.time - b.time);
+  return items.slice(-2000)
+    .map((c) => ({ time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Number(c.volume) || 0 }))
+    .filter((c) => Number.isFinite(c.time) && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0)
+      && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
+    .sort((a, b) => a.time - b.time)
+    .filter((c, i, all) => i === 0 || c.time > all[i - 1].time);
 }
 
-function analyze(symbol, mode, timeframe, price, candles, quoteUpdatedAt) {
+function analyze({ symbol, mode, timeframe, price, quoteUpdatedAt, candles }) {
+  // Exclude the current in-progress candle from indicator calculations.
   const bars = Object.fromEntries(TIMEFRAMES.map((tf) => [tf, candles[tf].slice(0, -1)]));
   if (bars['15m'].length < 200 || bars['5m'].length < 50 || bars['1m'].length < 50) throw new Error('Insufficient completed real OHLC candles.');
+
   const metrics = Object.fromEntries(TIMEFRAMES.map((tf) => [tf, indicators(bars[tf])]));
   const i1 = metrics['1m'], i5 = metrics['5m'], i15 = metrics['15m'];
-  const selected = metrics[timeframe], selectedBars = bars[timeframe], selectedCandle = selectedBars.at(-1);
+  const selected = metrics[timeframe], selectedBars = bars[timeframe], signalCandle = selectedBars.at(-1);
   const structure = swingState(bars['5m']);
-  const abnormalVolatility = i1.atr / Math.max(median(atrSeries(bars['1m']).slice(-100)), 1e-12) > 2.5;
-  const regime = abnormalVolatility ? 'تقلب مرتفع (معلومة فقط)' : i15.adx < 15 ? 'سوق عرضي/ضعيف الاتجاه' : i15.e50 > i15.e200 ? 'اتجاه صاعد' : i15.e50 < i15.e200 ? 'اتجاه هابط' : 'غير واضح';
-  const buyScore = scoreFor('BUY', { i1, i5, i15, price, structure, selectedCandle, selected });
-  const sellScore = scoreFor('SELL', { i1, i5, i15, price, structure, selectedCandle, selected });
-  const direction = buyScore >= sellScore ? 'BUY' : 'SELL';
+  const atrReference = median(atrSeries(bars['1m']).slice(-100));
+  const volatilityRatio = atrReference > 0 ? i1.atr / atrReference : 1;
+  const highVolatility = volatilityRatio > 2.5;
+  const trend = classifyTrend(i15, i5);
+  const buyScore = scoreFor('BUY', { i1, i5, i15, price, structure, signalCandle, selected, trend });
+  const sellScore = scoreFor('SELL', { i1, i5, i15, price, structure, signalCandle, selected, trend });
+  const direction = buyScore > sellScore ? 'BUY' : 'SELL';
   const score = Math.max(buyScore, sellScore);
-  const selectedConfirmation = direction === 'BUY'
-    ? selected.supertrend === 'BUY' || selected.rsi >= 55
-    : selected.supertrend === 'SELL' || selected.rsi <= 45;
 
-  // ATR volatility is no longer a trade veto. ATR still informs the stop and target distances.
-  const approved = score >= MIN_SIGNAL_SCORE && selectedConfirmation;
+  // Require a genuine directional setup on the chosen chart timeframe, but do not
+  // require every higher timeframe to agree or block entries only because ATR rose.
+  const trendAligned = direction === 'BUY'
+    ? selected.ema9 > selected.ema21 && selected.supertrend === 'BUY'
+    : selected.ema9 < selected.ema21 && selected.supertrend === 'SELL';
+  const momentumConfirmed = direction === 'BUY'
+    ? selected.rsi >= 50 && selected.rsi <= 76 && signalCandle.close > signalCandle.open
+    : selected.rsi <= 50 && selected.rsi >= 24 && signalCandle.close < signalCandle.open;
+  const notChasing = Math.abs(price - selected.ema21) <= Math.max(selected.atr * 2.25, price * 0.00005);
+  const approved = score >= MIN_SIGNAL_SCORE && trendAligned && momentumConfirmed && notChasing && selected.atr > 0;
+
   const reasons = [];
-  if (!selectedConfirmation) reasons.push(`لا يوجد تأكيد اتجاه من Supertrend أو RSI على ${timeframe}.`);
-  if (score < MIN_SIGNAL_SCORE) reasons.push(`النقاط ${score}/100 أقل من الحد الأدنى ${MIN_SIGNAL_SCORE}.`);
-  if (abnormalVolatility) reasons.push('التقلب مرتفع؛ لم يمنع ذلك التوصية لكنه يزيد المخاطر.');
+  if (score < MIN_SIGNAL_SCORE) reasons.push(`النقاط ${score}/100 أقل من الحد المطلوب ${MIN_SIGNAL_SCORE}.`);
+  if (!trendAligned) reasons.push(`اتجاه EMA 9/21 وSupertrend غير متوافق على ${timeframe}.`);
+  if (!momentumConfirmed) reasons.push(`شمعة الإغلاق أو RSI لا يؤكدان الزخم على ${timeframe}.`);
+  if (!notChasing) reasons.push('السعر بعيد عن EMA 21 بأكثر من نطاق ATR المسموح؛ تجنب مطاردة الحركة.');
+  if (highVolatility) reasons.push('التقلب مرتفع؛ لم يمنع الإشارة تلقائياً، لكنه يرفع مستوى المخاطر ويؤثر في الوقف.');
 
-  const swing = direction === 'BUY' ? Math.min(...selectedBars.slice(-20).map((c) => c.low)) : Math.max(...selectedBars.slice(-20).map((c) => c.high));
-  const distance = Math.max(selected.atr * (mode === 'scalp' ? 1.5 : 2), direction === 'BUY' ? price - swing : swing - price, selected.atr * 0.25);
-  const stopLoss = round(direction === 'BUY' ? price - distance : price + distance, symbol);
+  // Structure + ATR stop. A very distant swing is capped at 2.5 ATR to prevent
+  // oversized stops; targets are expressed as explicit risk multiples.
+  const recent = selectedBars.slice(-20);
+  const structureDistance = direction === 'BUY'
+    ? price - Math.min(...recent.map((bar) => bar.low)) + selected.atr * 0.15
+    : Math.max(...recent.map((bar) => bar.high)) - price + selected.atr * 0.15;
+  const rawStopDistance = Math.max(selected.atr * (mode === 'scalp' ? 1.25 : 1.6), structureDistance);
+  const stopDistance = Math.min(rawStopDistance, selected.atr * 2.5);
+  const stopLoss = round(direction === 'BUY' ? price - stopDistance : price + stopDistance, symbol);
   const risk = Math.abs(price - stopLoss);
   const trade = approved ? {
-    direction, entry: round(price, symbol), stopLoss,
-    tp1: round(price + (direction === 'BUY' ? 1 : -1) * risk, symbol),
-    tp2: round(price + (direction === 'BUY' ? 2 : -2) * risk, symbol),
-    tp3: round(price + (direction === 'BUY' ? 3 : -3) * risk, symbol),
-    breakEven: round(price, symbol), confidence: score, lotSize: null,
+    direction,
+    entry: round(price, symbol),
+    stopLoss,
+    tp1: round(price + (direction === 'BUY' ? 1 : -1) * risk * 1.5, symbol),
+    tp2: round(price + (direction === 'BUY' ? 1 : -1) * risk * 2, symbol),
+    tp3: round(price + (direction === 'BUY' ? 1 : -1) * risk * 2.5, symbol),
+    breakEven: round(price, symbol),
+    stopDistance: round(risk, symbol),
+    riskReward: { tp1: 1.5, tp2: 2, tp3: 2.5 },
+    confidence: score,
+    lotSize: null,
   } : null;
 
+  const reasonsForApproved = [`الدرجة ${score}/100، اتجاه EMA/Supertrend وزخم RSI مؤكدان على ${timeframe}.`, 'مستويات المخاطرة والأهداف محسوبة من ATR وبنية الشموع الحقيقية.'];
   return {
     approved, signal: approved ? direction : 'WAIT', candidateDirection: direction,
-    selectedConfirmation, selectedTimeframe: timeframe, buyScore, sellScore, score, scoreThreshold: MIN_SIGNAL_SCORE,
-    mode, timeframe, symbol, marketPrice: round(price, symbol), quoteUpdatedAt, marketRegime: regime,
+    score, scoreThreshold: MIN_SIGNAL_SCORE, scoreComponents: {
+      BUY: scoreForBreakdown('BUY', { i1, i5, i15, price, structure, signalCandle, selected, trend }),
+      SELL: scoreForBreakdown('SELL', { i1, i5, i15, price, structure, signalCandle, selected, trend }),
+    },
+    mode, timeframe, selectedTimeframe: timeframe, symbol, marketPrice: round(price, symbol), quoteUpdatedAt,
+    marketRegime: highVolatility ? `تقلب مرتفع (${volatilityRatio.toFixed(2)}× ATR المعتاد)` : trend,
+    volatility: { atr14: n(i1.atr), ratioToRecentMedian: n(volatilityRatio), elevated: highVolatility },
     dataMode: 'REAL_OHLC',
-    reasons: approved ? [`النقاط ${score} مع تأكيد ${direction} من ${timeframe} عبر Supertrend أو RSI.`] : reasons,
+    reasons: approved ? reasonsForApproved : reasons,
     trade,
     indicators: {
-      M15: { ema50: n(i15.e50), ema200: n(i15.e200), adx14: n(i15.adx), supertrend: i15.supertrend, rsi7: n(i15.rsi) },
-      M5: { ema9: n(i5.e9), ema21: n(i5.e21), ema50: n(i5.e50), vwap: n(i5.vwap), liquiditySweep: structure.sweep, structure: structure.direction, supertrend: i5.supertrend, rsi7: n(i5.rsi) },
-      M1: { ema9: n(i1.e9), ema21: n(i1.e21), rsi7: n(i1.rsi), atr14: n(i1.atr), supertrend: i1.supertrend },
-      selected: { timeframe, supertrend: selected.supertrend, rsi7: n(selected.rsi), atr14: n(selected.atr), close: n(selectedCandle.close) },
+      M15: { trend: i15.ema50 > i15.ema200 ? 'UP' : i15.ema50 < i15.ema200 ? 'DOWN' : 'MIXED', ema50: n(i15.ema50), ema200: n(i15.ema200), adx14: n(i15.adx) },
+      M5: { trend: i5.ema9 > i5.ema21 ? 'UP' : 'DOWN', ema9: n(i5.ema9), ema21: n(i5.ema21), ema50: n(i5.ema50), vwap: n(i5.vwap), liquiditySweep: structure.sweep, structure: structure.direction },
+      [timeframe]: { ema9: n(selected.ema9), ema21: n(selected.ema21), ema50: n(selected.ema50), rsi7: n(selected.rsi), atr14: n(selected.atr), supertrend: selected.supertrend, candleClose: n(signalCandle.close) },
     },
-    riskNotice: 'إشارة تحليلية مبنية على OHLC الفعلي وليست تنفيذاً أو ضماناً للربح. التق��ب المرتفع يزيد مخاطر الخسارة، وقد تختلف الأسعار عن وسيطك.',
+    riskNotice: 'إشارة تحليلية وليست تنفيذاً أو ضماناً للربح. الدرجة ليست احتمال ربح. التقلب المرتفع يرفع المخاطر؛ راجع حجم العقد وشروط وسيطك قبل أي قرار.',
   };
 }
 
-function scoreFor(direction, { i1, i5, i15, price, structure, selectedCandle, selected }) {
+function scoreFor(direction, input) {
+  return Object.values(scoreForBreakdown(direction, input)).reduce((sum, item) => sum + item.earned, 0);
+}
+function scoreForBreakdown(direction, { i1, i5, i15, price, structure, signalCandle, selected, trend }) {
   const buy = direction === 'BUY';
-  const flags = {
-    m15: buy ? i15.e50 > i15.e200 : i15.e50 < i15.e200,
-    m5: buy ? i5.e50 > i5.e200 && i5.e9 > i5.e21 : i5.e50 < i5.e200 && i5.e9 < i5.e21,
+  const checks = {
+    higherTrend: buy ? i15.ema50 > i15.ema200 : i15.ema50 < i15.ema200,
+    setupTrend: buy ? i5.ema50 > i5.ema200 && i5.ema9 > i5.ema21 : i5.ema50 < i5.ema200 && i5.ema9 < i5.ema21,
     vwap: buy ? price > i5.vwap : price < i5.vwap,
-    ema: buy ? selected.e9 > selected.e21 : selected.e9 < selected.e21,
-    sweep: structure.sweep === direction,
+    ema: buy ? selected.ema9 > selected.ema21 : selected.ema9 < selected.ema21,
+    liquidity: structure.sweep === direction,
     structure: structure.direction === direction,
-    rsi: buy ? selected.rsi >= 50 : selected.rsi <= 50,
-    adx: i15.adx >= 20,
-    candle: candleStrength(selectedCandle, selected.atr, direction) >= 0.45,
-    atr: selected.atr > 0,
+    rsi: buy ? selected.rsi >= 50 && selected.rsi <= 76 : selected.rsi <= 50 && selected.rsi >= 24,
+    adx: i15.adx >= 18,
+    candle: candleStrength(signalCandle, selected.atr, direction) >= 0.4,
+    volatility: selected.atr > 0,
   };
-  return Object.keys(WEIGHTS).reduce((sum, key) => sum + (flags[key] ? WEIGHTS[key] : 0), 0);
+  return Object.fromEntries(Object.entries(WEIGHTS).map(([key, weight]) => [key, { earned: checks[key] ? weight : 0, max: weight, passed: checks[key] }]));
 }
 
-function indicators(bars) { const closes = bars.map((bar) => bar.close), atr = atrSeries(bars); return { e9: ema(closes, 9), e21: ema(closes, 21), e50: ema(closes, 50), e200: ema(closes, 200), rsi: rsi(closes, 7), adx: adx(bars, 14), atr: atr.at(-1), vwap: vwap(bars), supertrend: supertrend(bars, atr) }; }
+function classifyTrend(i15, i5) {
+  if (i15.ema50 > i15.ema200 && i5.ema9 > i5.ema21) return 'اتجاه صاعد متوافق';
+  if (i15.ema50 < i15.ema200 && i5.ema9 < i5.ema21) return 'اتجاه هابط متوافق';
+  return 'اتجاه مختلط/انتقالي';
+}
+function indicators(bars) { const closes = bars.map((bar) => bar.close), atr = atrSeries(bars); return { ema9: ema(closes, 9), ema21: ema(closes, 21), ema50: ema(closes, 50), ema200: ema(closes, 200), rsi: rsi(closes, 7), adx: adx(bars, 14), atr: atr.at(-1), vwap: vwap(bars), supertrend: supertrend(bars, atr) }; }
 function ema(values, period) { let value = values[0], k = 2 / (period + 1); for (let i = 1; i < values.length; i++) value += (values[i] - value) * k; return value; }
 function rsi(values, period) { let gains = 0, losses = 0; for (let i = values.length - period; i < values.length; i++) { const d = values[i] - values[i - 1]; if (d > 0) gains += d; else losses -= d; } return losses === 0 ? 100 : 100 - 100 / (1 + gains / losses); }
 function atrSeries(bars) { const tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0)); return tr.map((_, i) => tr.slice(Math.max(0, i - 13), i + 1).reduce((a, x) => a + x, 0) / Math.min(i + 1, 14)); }
