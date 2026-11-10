@@ -10,15 +10,14 @@ export default async function handler(req, res) {
   let body;
   try { body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {}); }
   catch { return res.status(400).json({ success: false, error: 'Invalid JSON body' }); }
-
   const symbol = String(body.symbol || '').toUpperCase();
   const mode = body.mode === 'scalp' ? 'scalp' : 'standard';
   const timeframe = mode === 'scalp' ? '1m' : '15m';
   const price = Number(body.livePrice);
   const quoteUpdatedAt = Number(body.quoteUpdatedAt);
   const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  // Override with GEMINI_MODEL if your Google AI project uses a different available model.
-  const model = String(process.env.GEMINI_MODEL || 'gemini-3.8-flash').trim();
+  // Set GEMINI_MODEL in the server environment to override the default if required.
+  const model = String(process.env.GEMINI_MODEL || 'gemini-1.5-flash').trim();
 
   if (!SYMBOLS.has(symbol)) return res.status(400).json({ success: false, error: 'Unsupported symbol.' });
   if (!apiKey) return res.status(503).json({ success: false, error: 'Gemini analysis is not configured. Set GEMINI_API_KEY as a server-side environment variable.' });
@@ -29,7 +28,6 @@ export default async function handler(req, res) {
   if (!supplied || FRAMES.some((frame) => !Array.isArray(supplied[frame]) || supplied[frame].length < MIN_BARS[frame])) {
     return wait(res, { symbol, mode, timeframe, price, quoteUpdatedAt, reason: 'شموع OHLC الحقيقية غير مكتملة أو غير كافية للفريمات المطلوبة.' });
   }
-
   const candles = Object.fromEntries(FRAMES.map((frame) => [frame, sanitize(supplied[frame])]));
   if (FRAMES.some((frame) => candles[frame].length < MIN_BARS[frame])) return wait(res, { symbol, mode, timeframe, price, quoteUpdatedAt, reason: 'بيانات OHLC غير صالحة أو عدد الشموع المكتملة غير كافٍ.' });
   if (Date.now() - candles['1m'].at(-1).time > MAX_QUOTE_AGE_MS) return wait(res, { symbol, mode, timeframe, price, quoteUpdatedAt, reason: 'شمعة M1 الأحدث قديمة؛ لا يتم إصدار توصية.' });
@@ -43,10 +41,7 @@ export default async function handler(req, res) {
     return res.status(502).json({ success: false, error: String(error?.message || 'Gemini analysis failed') });
   }
 }
-
-function wait(res, { symbol, mode, timeframe, price = null, quoteUpdatedAt = null, reason }) {
-  return res.status(200).json({ success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE, symbol, mode, timeframe, marketPrice: price, quoteUpdatedAt, dataMode: 'REAL_OHLC_REQUIRED', trade: null, reasons: [reason], riskNotice: 'لم تُصدر توصية لغياب بيانات حقيقية كافية. تحليل الذكاء الاصطناعي لا يضمن الأرباح ولا ينفذ الأوامر.' });
-}
+function wait(res, { symbol, mode, timeframe, price = null, quoteUpdatedAt = null, reason }) { return res.status(200).json({ success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE, symbol, mode, timeframe, marketPrice: price, quoteUpdatedAt, dataMode: 'REAL_OHLC_REQUIRED', trade: null, reasons: [reason], riskNotice: 'لم تُصدر توصية لغياب بيانات حقيقية كافية. تحليل الذكاء الاصطناعي لا يضمن الأرباح ولا ينفذ الأوامر.' }); }
 function sanitize(items) { return items.slice(-1500).map((c) => ({ time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Math.max(0, Number(c.volume) || 0) })).filter((c) => Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close)).sort((a, b) => a.time - b.time).filter((c, i, all) => i === 0 || c.time > all[i - 1].time); }
 function calculateContext(candles, livePrice, selectedFrame) {
   const bars = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(0, -1)]));
