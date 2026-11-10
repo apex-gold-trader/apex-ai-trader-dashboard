@@ -7,7 +7,6 @@ const MAX_QUOTE_AGE_MS = 180_000;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' });
-
   let body;
   try { body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {}); }
   catch { return res.status(400).json({ success: false, error: 'Invalid JSON body' }); }
@@ -21,12 +20,10 @@ export default async function handler(req, res) {
   const model = String(process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
 
   if (!SYMBOLS.has(symbol)) return res.status(400).json({ success: false, error: 'Unsupported symbol.' });
-  if (!apiKey) return res.status(503).json({ success: false, error: 'تحليل Gemini غير مهيأ: أضف GEMINI_API_KEY كمتغير بيئة server-side في Vercel.' });
-  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quoteUpdatedAt)
-      || Date.now() - quoteUpdatedAt > MAX_QUOTE_AGE_MS || quoteUpdatedAt > Date.now() + 30_000) {
+  if (!apiKey) return res.status(503).json({ success: false, error: 'Gemini analysis is not configured. Set GEMINI_API_KEY as a server-side environment variable.' });
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quoteUpdatedAt) || Date.now() - quoteUpdatedAt > MAX_QUOTE_AGE_MS || quoteUpdatedAt > Date.now() + 30_000) {
     return wait(res, { symbol, mode, timeframe, reason: 'السعر الفوري غير متوفر أو قديم؛ لا يمكن بناء توصية على سعر غير موثوق.' });
   }
-
   const supplied = body.candles;
   if (!supplied || FRAMES.some((frame) => !Array.isArray(supplied[frame]) || supplied[frame].length < MIN_BARS[frame])) {
     return wait(res, { symbol, mode, timeframe, price, quoteUpdatedAt, reason: 'شموع OHLC الحقيقية غير مكتملة أو غير كافية للفريمات المطلوبة.' });
@@ -51,26 +48,16 @@ export default async function handler(req, res) {
 }
 
 function wait(res, { symbol, mode, timeframe, price = null, quoteUpdatedAt = null, reason }) {
-  return res.status(200).json({
-    success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE,
-    symbol, mode, timeframe, marketPrice: price, quoteUpdatedAt, dataMode: 'REAL_OHLC_REQUIRED',
-    trade: null, reasons: [reason],
-    riskNotice: 'لم تُصدر توصية لغياب بيانات حقيقية كافية. تحليل الذكاء الاصطناعي لا يضمن الأرباح ولا ينفذ الأوامر.',
-  });
+  return res.status(200).json({ success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE, symbol, mode, timeframe, marketPrice: price, quoteUpdatedAt, dataMode: 'REAL_OHLC_REQUIRED', trade: null, reasons: [reason], riskNotice: 'لم تُصدر توصية لغياب بيانات حقيقية كافية. تحليل الذكاء الاصطناعي لا يضمن الأرباح ولا ينفذ الأوامر.' });
 }
 
 function sanitize(items) {
-  return items.slice(-1500)
-    .map((c) => ({ time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Math.max(0, Number(c.volume) || 0) }))
-    .filter((c) => Number.isFinite(c.time) && c.time > 0
-      && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0)
-      && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
-    .sort((a, b) => a.time - b.time)
-    .filter((c, i, all) => i === 0 || c.time > all[i - 1].time);
+  return items.slice(-1500).map((c) => ({ time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Math.max(0, Number(c.volume) || 0) }))
+    .filter((c) => Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
+    .sort((a, b) => a.time - b.time).filter((c, i, all) => i === 0 || c.time > all[i - 1].time);
 }
 
 function calculateContext(candles, livePrice, selectedFrame) {
-  // Use only completed bars so an unfinished candle cannot produce a transient entry.
   const bars = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(0, -1)]));
   if (bars['15m'].length < 200 || bars['5m'].length < 50 || bars['1m'].length < 50) throw new Error('Insufficient completed candles for EMA and multi-timeframe checks.');
   const metrics = Object.fromEntries(FRAMES.map((frame) => [frame, indicators(bars[frame])]));
@@ -80,20 +67,30 @@ function calculateContext(candles, livePrice, selectedFrame) {
   const referenceAtr = median(atrSeries(bars['1m']).slice(-100));
   const volatilityRatio = referenceAtr > 0 ? metrics['1m'].atr / referenceAtr : 1;
   const components = {};
-  for (const direction of ['BUY', 'SELL']) components[direction] = scoreDirection(direction, { metrics, livePrice, structure, chosen, chosenBar });
-  const scoreTotal = (parts) => Object.values(parts).reduce((sum, item) => sum + item.earned, 0);
-  const buyScore = scoreTotal(components.BUY), sellScore = scoreTotal(components.SELL);
-  const trend = metrics['15m'].ema50 > metrics['15m'].ema200 ? 'UP' : metrics['15m'].ema50 < metrics['15m'].ema200 ? 'DOWN' : 'MIXED';
-  return {
-    bars, metrics, selectedFrame, chosen, chosenBar, structure, volatilityRatio,
-    components, buyScore, sellScore, trend,
+
+  // scoreDirection expects the individual timeframe metric objects. Pass the correct
+  // names here; the previous code supplied {metrics}, leaving i15 undefined and causing
+  // the runtime error while accessing i15.ema50.
+  const scoreInput = {
+    i5: metrics['5m'],
+    i15: metrics['15m'],
+    price: livePrice,
+    structure,
+    signalCandle: chosenBar,
+    selected: chosen,
   };
+  for (const direction of ['BUY', 'SELL']) components[direction] = scoreDirection(direction, scoreInput);
+  const scoreTotal = (parts) => Object.values(parts || {}).reduce((sum, item) => sum + (Number(item?.earned) || 0), 0);
+  const buyScore = scoreTotal(components.BUY);
+  const sellScore = scoreTotal(components.SELL);
+  const trend = metrics['15m'].ema50 > metrics['15m'].ema200 ? 'UP' : metrics['15m'].ema50 < metrics['15m'].ema200 ? 'DOWN' : 'MIXED';
+  return { bars, metrics, selectedFrame, chosen, chosenBar, structure, volatilityRatio, components, buyScore, sellScore, trend };
 }
 
 async function requestGemini({ apiKey, model, symbol, mode, timeframe, price, candles, technical }) {
   const frameData = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(-30).map(({ time, open, high, low, close, volume }) => ({ time, open, high, low, close, volume }))]));
   const prompt = [
-    'You are a cautious market-analysis assistant. Use only the supplied real OHLC candles and computed indicators; never claim certainty or invent market/news data.',
+    'You are a cautious market-analysis assistant. Use only supplied real OHLC candles and computed indicators; never claim certainty or invent market/news data.',
     `Instrument: ${symbol}; mode: ${mode}; entry timeframe: ${timeframe}; current provider price: ${price}.`,
     'Return exactly one JSON object with fields: direction (BUY, SELL, or WAIT), confidence (integer 0..100; analytical confidence, NOT win probability), rationale (short string), setup (short string).',
     'Choose BUY or SELL only when the selected timeframe has a clear trend/momentum setup. Otherwise choose WAIT. Do not output price levels; the server computes ATR/structure risk levels.',
@@ -101,13 +98,8 @@ async function requestGemini({ apiKey, model, symbol, mode, timeframe, price, ca
     `Recent actual OHLC candles: ${JSON.stringify(frameData)}`,
   ].join('\n');
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    signal: AbortSignal.timeout(15_000),
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.1, topP: 0.8, maxOutputTokens: 256, responseMimeType: 'application/json' },
-    }),
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, signal: AbortSignal.timeout(15_000),
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.1, topP: 0.8, maxOutputTokens: 256, responseMimeType: 'application/json' } }),
   });
   const raw = await response.text();
   let data;
@@ -117,14 +109,14 @@ async function requestGemini({ apiKey, model, symbol, mode, timeframe, price, ca
   if (!text) throw new Error('Gemini returned no analysis text.');
   let parsed;
   try { parsed = JSON.parse(text); } catch { throw new Error('Gemini response was not valid JSON.'); }
-  const direction = String(parsed.direction || '').toUpperCase();
-  const confidence = Number(parsed.confidence);
+  const direction = String(parsed.direction || '').toUpperCase(), confidence = Number(parsed.confidence);
   if (!['BUY', 'SELL', 'WAIT'].includes(direction) || !Number.isFinite(confidence) || confidence < 0 || confidence > 100) throw new Error('Gemini returned invalid direction or confidence.');
   return { direction, confidence: Math.round(confidence), rationale: String(parsed.rationale || '').slice(0, 500), setup: String(parsed.setup || '').slice(0, 200) };
 }
 
 function finalizeAnalysis({ ai, technical, symbol, mode, timeframe, price, quoteUpdatedAt }) {
-  const { chosen, chosenBar, components, buyScore, sellScore, structure, volatilityRatio, trend } = technical;
+  const { chosen, chosenBar, components, buyScore, sellScore, structure, volatilityRatio, trend, metrics, bars } = technical;
+  if (!chosen || !chosenBar || !metrics?.['5m'] || !metrics?.['15m'] || !bars?.[timeframe]) throw new Error('Analysis context is incomplete; no trade was generated.');
   const direction = ai.direction;
   const score = direction === 'BUY' ? buyScore : direction === 'SELL' ? sellScore : Math.max(buyScore, sellScore);
   const trendConfirmed = direction === 'BUY'
@@ -142,10 +134,8 @@ function finalizeAnalysis({ ai, technical, symbol, mode, timeframe, price, quote
   if (!notChasing) reasons.push('السعر ممتد بعيداً عن EMA21؛ تجنب مطاردة الحركة.');
   if (volatilityRatio > 2.5) reasons.push('تقلب مرتفع؛ لم يمنع الإشارة تلقائياً لكنه يزيد المخاطر.');
 
-  const recent = technical.bars[timeframe].slice(-20);
-  const structureDistance = direction === 'BUY'
-    ? price - Math.min(...recent.map((bar) => bar.low)) + chosen.atr * 0.15
-    : direction === 'SELL' ? Math.max(...recent.map((bar) => bar.high)) - price + chosen.atr * 0.15 : chosen.atr;
+  const recent = bars[timeframe].slice(-20);
+  const structureDistance = direction === 'BUY' ? price - Math.min(...recent.map((bar) => bar.low)) + chosen.atr * 0.15 : direction === 'SELL' ? Math.max(...recent.map((bar) => bar.high)) - price + chosen.atr * 0.15 : chosen.atr;
   const stopDistance = Math.min(Math.max(chosen.atr * (mode === 'scalp' ? 1.25 : 1.6), structureDistance), chosen.atr * 2.5);
   const stopLoss = round(direction === 'BUY' ? price - stopDistance : price + stopDistance, symbol);
   const risk = Math.abs(price - stopLoss);
@@ -160,16 +150,15 @@ function finalizeAnalysis({ ai, technical, symbol, mode, timeframe, price, quote
 
   return {
     approved, signal: approved ? direction : 'WAIT', candidateDirection: direction,
-    score, scoreThreshold: MIN_SCORE, aiConfidence: ai.confidence, buyScore, sellScore,
+    score, scoreThreshold: MIN_SCORE, scoreComponents: components, aiConfidence: ai.confidence, buyScore, sellScore,
     mode, timeframe, selectedTimeframe: timeframe, symbol, marketPrice: round(price, symbol), quoteUpdatedAt,
     marketRegime: volatilityRatio > 2.5 ? `تقلب مرتفع (${volatilityRatio.toFixed(2)}×)` : trend,
     volatility: { selectedAtr14: n(chosen.atr), oneMinuteAtrRatio: n(volatilityRatio), elevated: volatilityRatio > 2.5 },
-    dataMode: 'REAL_OHLC + GEMINI',
-    ai: { rationale: ai.rationale, setup: ai.setup },
+    dataMode: 'REAL_OHLC + GEMINI', ai: { rationale: ai.rationale, setup: ai.setup },
     reasons: approved ? [ai.rationale || 'Gemini والمؤشرات يؤكدان الإعداد.', `المجموع الفني ${score}/100؛ مستويات SL/TP محسوبة محلياً من ATR وبنية الشموع.`] : reasons,
     indicators: {
-      M15: { ema50: n(technical.metrics['15m'].ema50), ema200: n(technical.metrics['15m'].ema200), adx14: n(technical.metrics['15m'].adx) },
-      M5: { ema9: n(technical.metrics['5m'].ema9), ema21: n(technical.metrics['5m'].ema21), ema50: n(technical.metrics['5m'].ema50), vwap: n(technical.metrics['5m'].vwap), liquiditySweep: structure.sweep, structure: structure.direction },
+      M15: { ema50: n(metrics['15m'].ema50), ema200: n(metrics['15m'].ema200), adx14: n(metrics['15m'].adx) },
+      M5: { ema9: n(metrics['5m'].ema9), ema21: n(metrics['5m'].ema21), ema50: n(metrics['5m'].ema50), vwap: n(metrics['5m'].vwap), liquiditySweep: structure.sweep, structure: structure.direction },
       [timeframe]: { ema9: n(chosen.ema9), ema21: n(chosen.ema21), rsi7: n(chosen.rsi), atr14: n(chosen.atr), supertrend: chosen.supertrend },
     },
     trade,
@@ -178,7 +167,12 @@ function finalizeAnalysis({ ai, technical, symbol, mode, timeframe, price, quote
 }
 
 function scoreDirection(direction, input) { return scoreBreakdown(direction, input); }
-function scoreBreakdown(direction, { i5, i15, price, structure, signalCandle, selected }) {
+function scoreBreakdown(direction, input = {}) {
+  const { i5, i15, price, structure, signalCandle, selected } = input;
+  // Fail closed on incomplete indicator context instead of throwing an undefined-property error.
+  if (!i5 || !i15 || !structure || !signalCandle || !selected || !Number.isFinite(Number(price))) {
+    return Object.fromEntries(Object.entries(SCORE_WEIGHTS).map(([key, weight]) => [key, { earned: 0, max: weight, passed: false }]));
+  }
   const buy = direction === 'BUY';
   const checks = {
     higherTrend: buy ? i15.ema50 > i15.ema200 : i15.ema50 < i15.ema200,
@@ -192,8 +186,9 @@ function scoreBreakdown(direction, { i5, i15, price, structure, signalCandle, se
     candle: candleStrength(signalCandle, selected.atr, direction) >= 0.4,
     volatilityData: selected.atr > 0,
   };
-  return Object.fromEntries(Object.entries(SCORE_WEIGHTS).map(([key, weight]) => [key, { earned: checks[key] ? weight : 0, max: weight, passed: checks[key] }]));
+  return Object.fromEntries(Object.entries(SCORE_WEIGHTS).map(([key, weight]) => [key, { earned: checks[key] ? weight : 0, max: weight, passed: Boolean(checks[key]) }]));
 }
+
 function publicContext(technical) {
   const { metrics, buyScore, sellScore, trend, structure, selectedFrame } = technical;
   return { selectedFrame, trend, buyScore, sellScore, structure, frames: Object.fromEntries(FRAMES.map((frame) => [frame, { ema9: n(metrics[frame].ema9), ema21: n(metrics[frame].ema21), ema50: n(metrics[frame].ema50), ema200: n(metrics[frame].ema200), rsi7: n(metrics[frame].rsi), adx14: n(metrics[frame].adx), atr14: n(metrics[frame].atr), supertrend: metrics[frame].supertrend }])) };
