@@ -38,10 +38,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    // حساب السياق الفني المبدئي لتزويد الذكاء الاصطناعي برؤية دقيقة
     const context = calculateContext(candles, price, timeframe);
 
-    // الاتصال الحصري والأساسي مع Google Gemini AI بدون أي بدائل
+    // الاتصال المباشر والأساسي بـ Google Gemini AI
     const ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
     
     const result = finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt });
@@ -100,14 +99,18 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
-  const response = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+  // استخدام تمرير المفتاح في الهيدر (x-goog-api-key) لمنع أي مشاكل في صيغة الـ URL
+  const response = await fetch(GEMINI_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey
+    },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 300, responseMimeType: 'application/json' }
     }),
-    signal: AbortSignal.timeout(25_000) // مهلة آمنة 25 ثانية لرد الذكاء الاصطناعي
+    signal: AbortSignal.timeout(25_000)
   });
 
   const raw = await response.text();
@@ -120,7 +123,6 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
 
   let parsed;
   try {
-    // تنظيف النص في حال وجود ترميز إضافي
     const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
     parsed = JSON.parse(cleaned);
   } catch {
@@ -138,7 +140,7 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
 }
 
 function finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt }) {
-  const { selected, last, indicators, buyScore, sellScore } = context;
+  const { selected, indicators, buyScore, sellScore } = context;
   const score = ai.direction === 'BUY' ? buyScore : ai.direction === 'SELL' ? sellScore : Math.max(buyScore, sellScore);
   const approved = ai.direction !== 'WAIT' && ai.confidence >= 55 && score >= MIN_SCORE && selected.atr > 0;
 
@@ -249,3 +251,4 @@ function supertrend(bars, atr) {
 
 function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
 function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
+    
