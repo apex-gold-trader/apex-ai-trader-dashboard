@@ -3,7 +3,7 @@ const FRAMES = ['1m', '5m', '15m'];
 const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3.8-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 export default async function handler(req, res) {
@@ -189,4 +189,4 @@ function structure(bars) { const window = bars.slice(-31, -1), last = bars.at(-1
 function median(values) { const sorted = [...values].sort((a, b) => a - b); return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0; }
 function n(value) { return Number.isFinite(value) ? Number(value.toFixed(6)) : null; }
 function round(value, symbol) { return Number(value.toFixed(symbol === 'EURUSD' ? 5 : 2)); }
-    
+                                                                                         
