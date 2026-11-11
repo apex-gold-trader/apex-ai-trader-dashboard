@@ -3,7 +3,7 @@ const FRAMES = ['1m', '5m', '15m'];
 const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-2.0-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 export default async function handler(req, res) {
@@ -158,7 +158,7 @@ function finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt 
   } : null;
   const reasons = [];
   if (ai.direction === 'WAIT') reasons.push('Gemini لم يرَ إعداداً اتجاهياً واضحاً.');
-  if (score < MIN_SCORE) reasons.push(`الدر��ة الفنية ${score}/100 أقل من الحد ${MIN_SCORE}.`);
+  if (score < MIN_SCORE) reasons.push(`الدرجة الفنية ${score}/100 أقل من الحد ${MIN_SCORE}.`);
   if (ai.confidence < 55) reasons.push('ثقة التحليل منخفضة؛ لم يتم اعتماد الصفقة.');
   if (!directionConfirmed) reasons.push(`المؤشرات والشمعة المكتملة لا تؤكد اتجاه ${ai.direction} على ${timeframe}.`);
   if (!notChasing) reasons.push('السعر بعيد عن EMA21؛ تم تجنب مطاردة الحركة.');
@@ -189,3 +189,4 @@ function structure(bars) { const window = bars.slice(-31, -1), last = bars.at(-1
 function median(values) { const sorted = [...values].sort((a, b) => a - b); return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0; }
 function n(value) { return Number.isFinite(value) ? Number(value.toFixed(6)) : null; }
 function round(value, symbol) { return Number(value.toFixed(symbol === 'EURUSD' ? 5 : 2)); }
+    
