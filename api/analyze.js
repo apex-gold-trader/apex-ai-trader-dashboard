@@ -18,71 +18,63 @@ export default async function handler(req, res) {
   const price = Number(body.livePrice);
   const quoteUpdatedAt = Number(body.quoteUpdatedAt);
   const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
-  
+
   if (!SYMBOLS.has(symbol)) return res.status(400).json({ success: false, error: 'Unsupported symbol.' });
-  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quoteUpdatedAt) || Date.now() - quoteUpdatedAt > MAX_QUOTE_AGE_MS || quoteUpdatedAt > Date.now() + 30_000) {
-    return wait(res, symbol, mode, timeframe, null, null, 'السعر غير متوفر أو قديم؛ لا يمكن إجراء تحليل موثوق.');
+  if (!apiKey) {
+    return res.status(503).json({ success: false, error: 'مفتاح GEMINI_API_KEY غير متوفر في متغيرات البيئة على Vercel.' });
   }
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quoteUpdatedAt) || Date.now() - quoteUpdatedAt > MAX_QUOTE_AGE_MS) {
+    return wait(res, symbol, mode, timeframe, null, null, 'السعر الفوري غير متوفر أو قديم.');
+  }
+
   const supplied = body.candles;
   if (!supplied || FRAMES.some((frame) => !Array.isArray(supplied[frame]) || supplied[frame].length < MIN_BARS[frame])) {
-    return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'شموع OHLC الحقيقية غير مكتملة أو غير كافية.');
+    return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'بيانات شموع OHLC غير مكتملة.');
   }
 
   const candles = Object.fromEntries(FRAMES.map((frame) => [frame, sanitize(supplied[frame])]));
-  if (FRAMES.some((frame) => candles[frame].length < MIN_BARS[frame])) return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'بيانات OHLC غير صالحة أو غير كافية.');
-  if (Date.now() - candles['1m'].at(-1).time > MAX_QUOTE_AGE_MS) return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'أحدث شمعة M1 قديمة.');
+  if (FRAMES.some((frame) => candles[frame].length < MIN_BARS[frame])) {
+    return wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, 'بيانات الشموع غير صالحة.');
+  }
 
   try {
+    // حساب السياق الفني المبدئي لتزويد الذكاء الاصطناعي برؤية دقيقة
     const context = calculateContext(candles, price, timeframe);
-    let ai = null;
+
+    // الاتصال الحصري والأساسي مع Google Gemini AI بدون أي بدائل
+    const ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
     
-    if (apiKey) {
-      try {
-        ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
-      } catch (err) {
-        console.warn('Gemini request bypassed due to server load, falling back to indicator engine:', err?.message);
-      }
-    }
-
-    // Fallback ذكي جداً في حال ازدحام خوادم جوجل لضمان عدم توقف المنصة
-    if (!ai) {
-      const fallbackDir = context.buyScore >= context.sellScore ? 'BUY' : 'SELL';
-      ai = {
-        direction: Math.max(context.buyScore, context.sellScore) >= MIN_SCORE ? fallbackDir : 'WAIT',
-        confidence: Math.max(context.buyScore, context.sellScore),
-        rationale: 'تحليل تداولي مبني على توافق مؤشرات السعر الحقيقي (وضع الاستجابة السريعة).',
-        setup: 'Dynamic OHLC Technical Setup'
-      };
-    }
-
     const result = finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt });
-    return res.status(200).json({ success: true, source: apiKey && ai ? `Google Gemini + real OHLC` : 'Deterministic OHLC Analysis', ...result });
+    return res.status(200).json({ success: true, source: `Google Gemini AI (${GEMINI_MODEL}) + real OHLC`, ...result });
   } catch (error) {
-    console.error('Analysis execution failed:', error?.message || error);
-    return res.status(502).json({ success: false, error: error?.message || 'Analysis execution failed.' });
+    console.error('Gemini direct analysis error:', error?.message || error);
+    return res.status(502).json({ success: false, error: `خطأ من خوادم الذكاء الاصطناعي: ${error?.message || 'فشل الاتصال بـ Gemini'}` });
   }
 }
 
 function wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, reason) {
-  return res.status(200).json({ success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE, symbol, mode, timeframe, selectedTimeframe: timeframe, marketPrice: price, quoteUpdatedAt, dataMode: 'REAL_OHLC_REQUIRED', trade: null, reasons: [reason], riskNotice: 'لا توجد توصية عند نقص البيانات. التحليل فني وآلي.' });
+  return res.status(200).json({
+    success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE,
+    symbol, mode, timeframe, selectedTimeframe: timeframe, marketPrice: price, quoteUpdatedAt,
+    dataMode: 'REAL_OHLC_REQUIRED', trade: null, reasons: [reason],
+    riskNotice: 'تحليل الذكاء الاصطناعي معلق لحين اكتمال البيانات الشروط.'
+  });
 }
 
 function sanitize(items) {
-  return items.slice(-1500).map((c) => ({ time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Math.max(0, Number(c.volume) || 0) }))
-    .filter((c) => Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0) && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
+  return items.slice(-1500).map((c) => ({
+    time: Number(c.time), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close), volume: Math.max(0, Number(c.volume) || 0)
+  })).filter((c) => Number.isFinite(c.time) && c.time > 0 && [c.open, c.high, c.low, c.close].every((v) => Number.isFinite(v) && v > 0))
     .sort((a, b) => a.time - b.time).filter((c, i, all) => i === 0 || c.time > all[i - 1].time);
 }
 
 function calculateContext(candles, price, timeframe) {
   const completed = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(0, -1)]));
-  if (FRAMES.some((frame) => !completed[frame] || completed[frame].length < (frame === '15m' ? 200 : 50))) throw new Error('Insufficient completed real OHLC candles.');
   const indicators = Object.fromEntries(FRAMES.map((frame) => [frame, calculateIndicators(completed[frame])]));
   const selected = indicators[timeframe];
   const last = completed[timeframe].at(-1);
   const score = (direction) => scoreDirection(direction, indicators, price, last);
-  const buyScore = score('BUY');
-  const sellScore = score('SELL');
-  return { completed, indicators, selected, last, buyScore, sellScore, structure: structure(completed['5m']) };
+  return { completed, indicators, selected, last, buyScore: score('BUY'), sellScore: score('SELL') };
 }
 
 function scoreDirection(direction, indicators, price, last) {
@@ -91,113 +83,169 @@ function scoreDirection(direction, indicators, price, last) {
     buy ? indicators['15m'].ema50 > indicators['15m'].ema200 : indicators['15m'].ema50 < indicators['15m'].ema200,
     buy ? indicators['5m'].ema9 > indicators['5m'].ema21 : indicators['5m'].ema9 < indicators['5m'].ema21,
     buy ? price > indicators['5m'].vwap : price < indicators['5m'].vwap,
-    buy ? indicators['1m'].ema9 > indicators['1m'].ema21 : indicators['1m'].ema9 < indicators['1m'].ema21,
     buy ? indicators['1m'].rsi >= 50 : indicators['1m'].rsi <= 50,
-    buy ? indicators['15m'].adx >= 18 : indicators['15m'].adx >= 18,
-    buy ? last.close > last.open : last.close < last.open,
   ];
   return Math.round(tests.filter(Boolean).length / tests.length * 100);
 }
 
 async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context }) {
-  const candleWindow = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(-40).map(({ time, open, high, low, close, volume }) => ({ time, open, high, low, close, volume }))]));
+  const candleWindow = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(-30).map(({ time, open, high, low, close }) => ({ time, open, high, low, close }))]));
+  
   const prompt = [
-    'Act as a cautious market-analysis assistant. Analyze only supplied real OHLC data and computed indicators.',
-    `Instrument: ${symbol}; mode: ${mode}; timeframe: ${timeframe}; quote: ${price}.`,
-    'Return exactly one JSON object: {"direction":"BUY|SELL|WAIT","confidence":0,"rationale":"short reason","setup":"short setup"}.',
-    `Computed indicators: ${JSON.stringify(publicContext(context))}`,
-    `Recent candles: ${JSON.stringify(candleWindow)}`,
+    'You are an expert AI Scalping and Trading Assistant. Analyze the provided market data, indicators, and real OHLC candles.',
+    `Target Instrument: ${symbol}, Mode: ${mode}, Timeframe: ${timeframe}, Current Live Price: ${price}.`,
+    'You must return ONLY a valid JSON object with no markdown formatting, structured strictly like this:',
+    '{"direction": "BUY" or "SELL" or "WAIT", "confidence": number between 0 and 100, "rationale": "short professional explanation in Arabic"}',
+    `Technical Indicators Summary: ${JSON.stringify(publicContext(context))}`,
+    `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
-  const response = await fetchWithRetry(GEMINI_URL, {
+  const response = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.1, topP: 0.8, maxOutputTokens: 256, responseMimeType: 'application/json' } }),
-  }, 2, 20_000); // مهلة زمنية موسعة إلى 20 ثانية لتجنب التوقف
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 300, responseMimeType: 'application/json' }
+    }),
+    signal: AbortSignal.timeout(25_000) // مهلة آمنة 25 ثانية لرد الذكاء الاصطناعي
+  });
 
   const raw = await response.text();
   let payload;
-  try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error(`Gemini returned invalid JSON (${response.status}).`); }
-  if (!response.ok) throw new Error(payload?.error?.message || `Gemini API error ${response.status}.`);
-  const text = payload?.candidates?.[0]?.content?.parts?.map((part) => typeof part.text === 'string' ? part.text : '').join('').trim();
-  if (!text) throw new Error('Gemini returned no analysis text.');
-  let parsed;
-  try { parsed = JSON.parse(text); } catch { throw new Error('Gemini analysis was not valid JSON.'); }
-  const direction = String(parsed.direction || '').toUpperCase();
-  const confidence = Number(parsed.confidence);
-  if (!['BUY', 'SELL', 'WAIT'].includes(direction) || !Number.isFinite(confidence) || confidence < 0 || confidence > 100) throw new Error('Gemini returned invalid direction or confidence.');
-  return { direction, confidence: Math.round(confidence), rationale: String(parsed.rationale || '').slice(0, 500), setup: String(parsed.setup || '').slice(0, 200) };
-}
+  try { payload = raw ? JSON.parse(raw) : {}; } catch { throw new Error(`رد غير صالح من Gemini (${response.status})`); }
+  if (!response.ok) throw new Error(payload?.error?.message || `خطأ من واجهة Gemini برمز ${response.status}`);
 
-async function fetchWithRetry(url, options, maxAttempts = 2, timeoutMs = 20_000) {
-  let lastError;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      const response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
-      if (response.ok || !isTransientStatus(response.status) || attempt === maxAttempts - 1) return response;
-      await response.body?.cancel().catch(() => {});
-      await sleep(1000);
-    } catch (error) {
-      lastError = error;
-      if (attempt === maxAttempts - 1) throw error;
-      await sleep(1000);
-    }
+  const text = payload?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('').trim();
+  if (!text) throw new Error('لم يرجع نموذج Gemini أي نص تحليلي.');
+
+  let parsed;
+  try {
+    // تنظيف النص في حال وجود ترميز إضافي
+    const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    parsed = JSON.parse(cleaned);
+  } catch {
+    throw new Error('فشل قراءة مخرجات JSON من تحليل الذكاء الاصطناعي.');
   }
-  throw lastError || new Error('Gemini request failed after retries.');
+
+  const direction = String(parsed.direction || 'WAIT').toUpperCase();
+  const confidence = Number(parsed.confidence || 50);
+  return {
+    direction: ['BUY', 'SELL', 'WAIT'].includes(direction) ? direction : 'WAIT',
+    confidence: Number.isFinite(confidence) ? Math.round(confidence) : 50,
+    rationale: String(parsed.rationale || 'تحليل مباشر عبر نموذج الذكاء الاصطناعي.').slice(0, 400),
+    setup: 'AI Direct Neural Setup'
+  };
 }
-function isTransientStatus(status) { return status === 429 || status === 500 || status === 502 || status === 503 || status === 504; }
-function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 function finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt }) {
-  const { selected, last, completed, indicators, buyScore, sellScore } = context;
-  if (!selected || !last || !indicators?.['5m'] || !indicators?.['15m']) throw new Error('Analysis context is incomplete.');
+  const { selected, last, indicators, buyScore, sellScore } = context;
   const score = ai.direction === 'BUY' ? buyScore : ai.direction === 'SELL' ? sellScore : Math.max(buyScore, sellScore);
-  const directionConfirmed = ai.direction === 'BUY'
-    ? selected.ema9 > selected.ema21 && selected.supertrend === 'BUY' && selected.rsi >= 50 && last.close > last.open
-    : ai.direction === 'SELL' && selected.ema9 < selected.ema21 && selected.supertrend === 'SELL' && selected.rsi <= 50 && last.close < last.open;
-  const notChasing = Math.abs(price - selected.ema21) <= Math.max(selected.atr * 2.5, price * 0.00005);
-  const approved = ai.direction !== 'WAIT' && score >= MIN_SCORE && ai.confidence >= 55 && directionConfirmed && notChasing && selected.atr > 0;
-  const recent = completed[timeframe].slice(-20);
-  const structureDistance = ai.direction === 'BUY'
-    ? price - Math.min(...recent.map((bar) => bar.low)) + selected.atr * 0.15
-    : ai.direction === 'SELL' ? Math.max(...recent.map((bar) => bar.high)) - price + selected.atr * 0.15 : selected.atr;
-  const stopDistance = Math.min(Math.max(selected.atr * (mode === 'scalp' ? 1.25 : 1.6), structureDistance), selected.atr * 2.5);
-  const stopLoss = round(ai.direction === 'BUY' ? price - stopDistance : price + stopDistance, symbol);
-  const risk = Math.abs(price - stopLoss);
+  const approved = ai.direction !== 'WAIT' && ai.confidence >= 55 && score >= MIN_SCORE && selected.atr > 0;
+
+  const risk = selected.atr * (mode === 'scalp' ? 1.25 : 1.6);
+  const stopLoss = round(ai.direction === 'BUY' ? price - risk : price + risk, symbol);
+  const riskDist = Math.abs(price - stopLoss);
+
   const trade = approved ? {
-    direction: ai.direction, entry: round(price, symbol), stopLoss,
-    tp1: round(price + (ai.direction === 'BUY' ? 1 : -1) * risk * 1.5, symbol),
+    direction: ai.direction,
+    entry: round(price, symbol),
+    stopLoss,
+    tp1: round(price + (ai.direction === 'BUY' ? 1 : -1) * riskDist * 1.5, symbol),
     tp2: round(price + (ai.direction === 'BUY' ? 1 : -1) * risk * 2, symbol),
     tp3: round(price + (ai.direction === 'BUY' ? 1 : -1) * risk * 2.5, symbol),
-    breakEven: round(price, symbol), confidence: ai.confidence, stopDistance: round(risk, symbol),
-    riskReward: { tp1: 1.5, tp2: 2, tp3: 2.5 }, lotSize: null,
+    breakEven: round(price, symbol),
+    confidence: ai.confidence,
+    stopDistance: round(riskDist, symbol),
+    riskReward: { tp1: 1.5, tp2: 2, tp3: 2.5 },
+    lotSize: null
   } : null;
-  const reasons = [];
-  if (ai.direction === 'WAIT') reasons.problems = reasons.push('لم يتم تأكيد إعداد اتجاهي كافٍ.');
+
   return {
-    approved, signal: approved ? ai.direction : 'WAIT', candidateDirection: ai.direction,
-    score, scoreThreshold: MIN_SCORE, aiConfidence: ai.confidence, buyScore, sellScore,
-    mode, timeframe, selectedTimeframe: timeframe, symbol, marketPrice: round(price, symbol), quoteUpdatedAt,
-    dataMode: 'REAL_OHLC + AI', marketRegime: indicators['15m'].ema50 > indicators['15m'].ema200 ? 'UP' : 'DOWN',
-    ai: { rationale: ai.rationale, setup: ai.setup }, trade,
-    indicators: Object.fromEntries(FRAMES.map((frame) => [frame, { ema9: n(indicators[frame].ema9), ema21: n(indicators[frame].ema21), ema50: n(indicators[frame].ema50), ema200: n(indicators[frame].ema200), rsi7: n(indicators[frame].rsi), atr14: n(indicators[frame].atr), adx14: n(indicators[frame].adx), supertrend: indicators[frame].supertrend }])),
-    reasons: approved ? [ai.rationale] : ['بانتظار اكتمال شروط التقاطع والزخم.'],
-    riskNotice: 'تحليل تداولي آلي وليس ضماناً للربح.',
+    approved,
+    signal: approved ? ai.direction : 'WAIT',
+    candidateDirection: ai.direction,
+    score,
+    scoreThreshold: MIN_SCORE,
+    aiConfidence: ai.confidence,
+    buyScore,
+    sellScore,
+    mode,
+    timeframe,
+    selectedTimeframe: timeframe,
+    symbol,
+    marketPrice: round(price, symbol),
+    quoteUpdatedAt,
+    dataMode: 'REAL_OHLC + GEMINI_AI_DIRECT',
+    marketRegime: indicators['15m'].ema50 > indicators['15m'].ema200 ? 'UP' : 'DOWN',
+    ai: { rationale: ai.rationale, setup: ai.setup },
+    trade,
+    indicators: Object.fromEntries(FRAMES.map((frame) => [frame, {
+      ema9: n(indicators[frame].ema9),
+      ema21: n(indicators[frame].ema21),
+      ema50: n(indicators[frame].ema50),
+      ema200: n(indicators[frame].ema200),
+      rsi: n(indicators[frame].rsi),
+      atr: n(indicators[frame].atr),
+      supertrend: indicators[frame].supertrend
+    }])),
+    reasons: [ai.rationale],
+    riskNotice: 'قرار تحليلي صادر مباشرة عن نموذج Google Gemini AI.'
   };
 }
 
 function calculateIndicators(bars) {
-  const closes = bars.map((bar) => bar.close), atr = atrSeries(bars);
-  return { ema9: ema(closes, 9), ema21: ema(closes, 21), ema50: ema(closes, 50), ema200: ema(closes, 200), rsi: rsi(closes, 7), atr: atr.at(-1), adx: adx(bars, 14), vwap: vwap(bars), supertrend: supertrend(bars, atr) };
+  const closes = bars.map((b) => b.close), atr = atrSeries(bars);
+  return {
+    ema9: ema(closes, 9), ema21: ema(closes, 21), ema50: ema(closes, 50), ema200: ema(closes, 200),
+    rsi: rsi(closes, 7), atr: atr.at(-1), vwap: vwap(bars), supertrend: supertrend(bars, atr)
+  };
 }
-function publicContext(context) { return { scores: { BUY: context.buyScore, SELL: context.sellScore }, structure: context.structure, indicators: Object.fromEntries(FRAMES.map((frame) => [frame, Object.fromEntries(Object.entries(context.indicators[frame]).map(([key, value]) => [key, typeof value === 'number' ? n(value) : value]))])) }; }
-function ema(values, period) { let value = values[0], k = 2 / (period + 1); for (let i = 1; i < values.length; i++) value += (values[i] - value) * k; return value; }
-function rsi(values, period) { let gains = 0, losses = 0; for (let i = values.length - period; i < values.length; i++) { const d = values[i] - values[i - 1]; if (d > 0) gains += d; else losses -= d; } return losses === 0 ? 100 : 100 - 100 / (1 + gains / losses); }
-function atrSeries(bars) { const tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0)); return tr.map((_, i) => tr.slice(Math.max(0, i - 13), i + 1).reduce((sum, value) => sum + value, 0) / Math.min(i + 1, 14)); }
-function adx(bars, period) { let plus = 0, minus = 0, total = 0; for (let i = bars.length - period; i < bars.length; i++) { const up = bars[i].high - bars[i - 1].high, down = bars[i - 1].low - bars[i].low; plus += up > down && up > 0 ? up : 0; minus += down > up && down > 0 ? down : 0; total += Math.max(bars[i].high - bars[i].low, Math.abs(bars[i].high - bars[i - 1].close), Math.abs(bars[i].low - bars[i - 1].close)); } const p = total ? 100 * plus / total : 0, m = total ? 100 * minus / total : 0; return p + m ? 100 * Math.abs(p - m) / (p + m) : 0; }
-function vwap(bars) { const date = new Date(bars.at(-1).time).toISOString().slice(0, 10), session = bars.filter((bar) => new Date(bar.time).toISOString().slice(0, 10) === date); let pv = 0, volume = 0; for (const bar of session) { const v = bar.volume > 0 ? bar.volume : 1; pv += ((bar.high + bar.low + bar.close) / 3) * v; volume += v; } return pv / volume; }
-function supertrend(bars, atr) { let direction = 'BUY', upper = 0, lower = 0; for (let i = 10; i < bars.length; i++) { const mid = (bars[i].high + bars[i].low) / 2, nextUpper = mid + 3 * atr[i], nextLower = mid - 3 * atr[i]; upper = nextUpper < upper || bars[i - 1].close > upper ? nextUpper : upper; lower = nextLower > lower || bars[i - 1].close < lower ? nextLower : lower; if (bars[i].close > upper) direction = 'BUY'; else if (bars[i].close < lower) direction = 'SELL'; } return direction; }
-function structure(bars) { const window = bars.slice(-31, -1), last = bars.at(-1), high = Math.max(...window.map((bar) => bar.high)), low = Math.min(...window.map((bar) => bar.low)); return { sweep: last.low < low && last.close > low ? 'BUY' : last.high > high && last.close < high ? 'SELL' : 'NONE', direction: last.close > high ? 'BUY' : last.close < low ? 'SELL' : 'NONE' }; }
-function n(value) { return Number.isFinite(value) ? Number(value.toFixed(6)) : null; }
-function round(value, symbol) { return Number(value.toFixed(symbol === 'EURUSD' ? 5 : 2)); }
-      
+
+function publicContext(context) {
+  return { scores: { BUY: context.buyScore, SELL: context.sellScore }, lastCandle: context.last };
+}
+
+function ema(values, period) {
+  let value = values[0], k = 2 / (period + 1);
+  for (let i = 1; i < values.length; i++) value += (values[i] - value) * k;
+  return value;
+}
+
+function rsi(values, period) {
+  let gains = 0, losses = 0;
+  for (let i = values.length - period; i < values.length; i++) {
+    const d = values[i] - values[i - 1];
+    if (d > 0) gains += d; else losses -= d;
+  }
+  return losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
+}
+
+function atrSeries(bars) {
+  const tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0));
+  return tr.map((_, i) => tr.slice(Math.max(0, i - 13), i + 1).reduce((s, v) => s + v, 0) / Math.min(i + 1, 14));
+}
+
+function vwap(bars) {
+  let pv = 0, volume = 0;
+  for (const bar of bars) {
+    const v = bar.volume > 0 ? bar.volume : 1;
+    pv += ((bar.high + bar.low + bar.close) / 3) * v;
+    volume += v;
+  }
+  return pv / volume;
+}
+
+function supertrend(bars, atr) {
+  let direction = 'BUY', upper = 0, lower = 0;
+  for (let i = 10; i < bars.length; i++) {
+    const mid = (bars[i].high + bars[i].low) / 2;
+    upper = (mid + 3 * atr[i] < upper || bars[i - 1].close > upper) ? mid + 3 * atr[i] : upper;
+    lower = (mid - 3 * atr[i] > lower || bars[i - 1].close < lower) ? mid - 3 * atr[i] : lower;
+    if (bars[i].close > upper) direction = 'BUY';
+    else if (bars[i].close < lower) direction = 'SELL';
+  }
+  return direction;
+}
+
+function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
+function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
