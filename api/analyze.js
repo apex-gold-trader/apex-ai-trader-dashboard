@@ -4,7 +4,6 @@ const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
-// التعديل الجذري هنا: استخدام الإصدار v1 المستقر الذي تطلبه خوادم جوجل حصرياً
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
 
 export default async function handler(req, res) {
@@ -72,7 +71,8 @@ function calculateContext(candles, price, timeframe) {
   const completed = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(0, -1)]));
   const indicators = Object.fromEntries(FRAMES.map((frame) => [frame, calculateIndicators(completed[frame])]));
   const selected = indicators[timeframe];
-  const last = completed[frame].at(-1);
+  // تم تصحيح الخطأ هنا واستخدام timeframe بدلاً من frame غير المعرف
+  const last = completed[timeframe].at(-1);
   const score = (direction) => scoreDirection(direction, indicators, price, last);
   return { completed, indicators, selected, last, buyScore: score('BUY'), sellScore: score('SELL') };
 }
