@@ -4,7 +4,8 @@ const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// التعديل الجذري هنا: استخدام الإصدار v1 المستقر الذي تطلبه خوادم جوجل حصرياً
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' });
@@ -40,11 +41,11 @@ export default async function handler(req, res) {
   try {
     const context = calculateContext(candles, price, timeframe);
 
-    // الاتصال المباشر والأساسي بـ Google Gemini AI
+    // الاتصال المباشر والأساسي حصرياً مع Google Gemini AI
     const ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
     
     const result = finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt });
-    return res.status(200).json({ success: true, source: `Google Gemini AI (${GEMINI_MODEL}) + real OHLC`, ...result });
+    return res.status(200).json({ success: true, source: `Google Gemini AI (${GEMINI_MODEL} on v1) + real OHLC`, ...result });
   } catch (error) {
     console.error('Gemini direct analysis error:', error?.message || error);
     return res.status(502).json({ success: false, error: `خطأ من خوادم الذكاء الاصطناعي: ${error?.message || 'فشل الاتصال بـ Gemini'}` });
@@ -71,7 +72,7 @@ function calculateContext(candles, price, timeframe) {
   const completed = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(0, -1)]));
   const indicators = Object.fromEntries(FRAMES.map((frame) => [frame, calculateIndicators(completed[frame])]));
   const selected = indicators[timeframe];
-  const last = completed[timeframe].at(-1);
+  const last = completed[frame].at(-1);
   const score = (direction) => scoreDirection(direction, indicators, price, last);
   return { completed, indicators, selected, last, buyScore: score('BUY'), sellScore: score('SELL') };
 }
@@ -99,7 +100,6 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
-  // استخدام تمرير المفتاح في الهيدر (x-goog-api-key) لمنع أي مشاكل في صيغة الـ URL
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
@@ -251,4 +251,4 @@ function supertrend(bars, atr) {
 
 function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
 function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
-    
+                                                                                           
