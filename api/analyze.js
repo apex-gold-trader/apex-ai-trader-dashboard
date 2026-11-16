@@ -6,7 +6,7 @@ const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
 
-// المفتاح الخاص بك بصيغة Access Token (Bearer)
+// مفتاح الوصول الخاص بك
 const HARDCODED_API_KEY = 'AQ.Ab8RN6L3__6yGBttCmYSIkZE7JJKGeMWOKgnd7ZKyiS6-Y1Ngg';
 
 export default async function handler(req, res) {
@@ -103,7 +103,6 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
-  // التعديل الحاسم هنا: إرسال المفتاح كـ Bearer Token في ترويسة Authorization
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
@@ -227,7 +226,7 @@ function rsi(values, period) {
 }
 
 function atrSeries(bars) {
-  The tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0));
+  const tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0));
   return tr.map((_, i) => tr.slice(Math.max(0, i - 13), i + 1).reduce((s, v) => s + v, 0) / Math.min(i + 1, 14));
 }
 
