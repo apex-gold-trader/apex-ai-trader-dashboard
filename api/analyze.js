@@ -4,6 +4,7 @@ const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
+// الرابط القياسي الصحيح بدون بادئة models الزائدة لتجنب خطأ الـ API
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
 
 export default async function handler(req, res) {
@@ -40,11 +41,11 @@ export default async function handler(req, res) {
   try {
     const context = calculateContext(candles, price, timeframe);
 
-    // الاتصال المباشر والأساسي حصرياً مع Google Gemini AI
+    // الاتصال المباشر والأساسي بـ Google Gemini AI
     const ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
     
     const result = finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt });
-    return res.status(200).json({ success: true, source: `Google Gemini AI (${GEMINI_MODEL} on v1) + real OHLC`, ...result });
+    return res.status(200).json({ success: true, source: `Google Gemini AI (${GEMINI_MODEL}) + real OHLC`, ...result });
   } catch (error) {
     console.error('Gemini direct analysis error:', error?.message || error);
     return res.status(502).json({ success: false, error: `خطأ من خوادم الذكاء الاصطناعي: ${error?.message || 'فشل الاتصال بـ Gemini'}` });
@@ -56,7 +57,7 @@ function wait(res, symbol, mode, timeframe, price, quoteUpdatedAt, reason) {
     success: true, approved: false, signal: 'WAIT', score: null, scoreThreshold: MIN_SCORE,
     symbol, mode, timeframe, selectedTimeframe: timeframe, marketPrice: price, quoteUpdatedAt,
     dataMode: 'REAL_OHLC_REQUIRED', trade: null, reasons: [reason],
-    riskNotice: 'تحليل الذكاء الاصطناعي معلق لحين اكتمال البيانات الشروط.'
+    riskNotice: 'تحليل الذكاء الاصطناعي معلق لحين اكتمال بيانات الشروط.'
   });
 }
 
@@ -71,7 +72,6 @@ function calculateContext(candles, price, timeframe) {
   const completed = Object.fromEntries(FRAMES.map((frame) => [frame, candles[frame].slice(0, -1)]));
   const indicators = Object.fromEntries(FRAMES.map((frame) => [frame, calculateIndicators(completed[frame])]));
   const selected = indicators[timeframe];
-  // تم تصحيح الخطأ هنا واستخدام timeframe بدلاً من frame غير المعرف
   const last = completed[timeframe].at(-1);
   const score = (direction) => scoreDirection(direction, indicators, price, last);
   return { completed, indicators, selected, last, buyScore: score('BUY'), sellScore: score('SELL') };
@@ -100,6 +100,7 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
+  // تمرير المفتاح عبر الهيدر وبدون أي تداخل في الرابط
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
@@ -251,4 +252,4 @@ function supertrend(bars, atr) {
 
 function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
 function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
-                                                                                           
+        
