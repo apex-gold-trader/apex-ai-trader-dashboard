@@ -4,10 +4,9 @@ const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
-// استخدام v1beta مع النموذج المستقر gemini-1.5-flash
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
 
-// تضمين المفتاح مباشرة داخل الكود بناءً على رغبتك لضمان عمل النظام فوراً ودون مشاكل متغيرات البيئة
+// المفتاح الخاص بك بصيغة Access Token (Bearer)
 const HARDCODED_API_KEY = 'AQ.Ab8RN6L3__6yGBttCmYSIkZE7JJKGeMWOKgnd7ZKyiS6-Y1Ngg';
 
 export default async function handler(req, res) {
@@ -22,7 +21,6 @@ export default async function handler(req, res) {
   const price = Number(body.livePrice);
   const quoteUpdatedAt = Number(body.quoteUpdatedAt);
   
-  // استخدام المفتاح المباشر المضمن في الكود
   const apiKey = HARDCODED_API_KEY || String(process.env.GEMINI_API_KEY || '').trim();
 
   if (!SYMBOLS.has(symbol)) return res.status(400).json({ success: false, error: 'Unsupported symbol.' });
@@ -46,7 +44,7 @@ export default async function handler(req, res) {
   try {
     const context = calculateContext(candles, price, timeframe);
 
-    // الاتصال المباشر والأساسي بـ Google Gemini AI
+    // الاتصال المباشر والأساسي بـ Google Gemini AI باستخدام Bearer Token
     const ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
     
     const result = finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt });
@@ -105,11 +103,12 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
+  // التعديل الحاسم هنا: إرسال المفتاح كـ Bearer Token في ترويسة Authorization
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey
+      'Authorization': `Bearer ${apiKey}`
     },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
@@ -228,7 +227,7 @@ function rsi(values, period) {
 }
 
 function atrSeries(bars) {
-  const tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0));
+  The tr = bars.map((c, i) => Math.max(c.high - c.low, i ? Math.abs(c.high - bars[i - 1].close) : 0, i ? Math.abs(c.low - bars[i - 1].close) : 0));
   return tr.map((_, i) => tr.slice(Math.max(0, i - 13), i + 1).reduce((s, v) => s + v, 0) / Math.min(i + 1, 14));
 }
 
@@ -256,4 +255,4 @@ function supertrend(bars, atr) {
 
 function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
 function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
-                                             
+              
