@@ -4,8 +4,11 @@ const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
-// الرابط القياسي الصحيح بدون بادئة models الزائدة لتجنب خطأ الـ API
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
+// استخدام v1beta مع النموذج المستقر gemini-1.5-flash
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+// تضمين المفتاح مباشرة داخل الكود بناءً على رغبتك لضمان عمل النظام فوراً ودون مشاكل متغيرات البيئة
+const HARDCODED_API_KEY = 'AQ.Ab8RN6L3__6yGBttCmYSIkZE7JJKGeMWOKgnd7ZKyiS6-Y1Ngg';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' });
@@ -18,11 +21,13 @@ export default async function handler(req, res) {
   const timeframe = mode === 'scalp' ? '1m' : '15m';
   const price = Number(body.livePrice);
   const quoteUpdatedAt = Number(body.quoteUpdatedAt);
-  const apiKey = String(process.env.GEMINI_API_KEY || '').trim();
+  
+  // استخدام المفتاح المباشر المضمن في الكود
+  const apiKey = HARDCODED_API_KEY || String(process.env.GEMINI_API_KEY || '').trim();
 
   if (!SYMBOLS.has(symbol)) return res.status(400).json({ success: false, error: 'Unsupported symbol.' });
   if (!apiKey) {
-    return res.status(503).json({ success: false, error: 'مفتاح GEMINI_API_KEY غير متوفر في متغيرات البيئة على Vercel.' });
+    return res.status(503).json({ success: false, error: 'مفتاح Gemini غير متوفر.' });
   }
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quoteUpdatedAt) || Date.now() - quoteUpdatedAt > MAX_QUOTE_AGE_MS) {
     return wait(res, symbol, mode, timeframe, null, null, 'السعر الفوري غير متوفر أو قديم.');
@@ -100,7 +105,6 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
-  // تمرير المفتاح عبر الهيدر وبدون أي تداخل في الرابط
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
@@ -252,4 +256,4 @@ function supertrend(bars, atr) {
 
 function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
 function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
-        
+                                             
