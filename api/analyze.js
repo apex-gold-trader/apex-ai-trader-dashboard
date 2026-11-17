@@ -4,9 +4,10 @@ const MIN_BARS = { '1m': 60, '5m': 60, '15m': 205 };
 const MIN_SCORE = 60;
 const MAX_QUOTE_AGE_MS = 180_000;
 const GEMINI_MODEL = 'gemini-1.5-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/${GEMINI_MODEL}:generateContent`;
+// العودة إلى v1beta الرسمية التي تتوافق تماماً مع مفاتيح الـ API
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-// مفتاح الوصول الخاص بك
+// المفتاح المباشر الخاص بك بصيغة API Key الصحيحة
 const HARDCODED_API_KEY = 'AQ.Ab8RN6L3__6yGBttCmYSIkZE7JJKGeMWOKgnd7ZKyiS6-Y1Ngg';
 
 export default async function handler(req, res) {
@@ -44,7 +45,7 @@ export default async function handler(req, res) {
   try {
     const context = calculateContext(candles, price, timeframe);
 
-    // الاتصال المباشر والأساسي بـ Google Gemini AI باستخدام Bearer Token
+    // الاتصال المباشر بـ Google Gemini AI باستخدام x-goog-api-key الصحيحة
     const ai = await requestGemini({ apiKey, symbol, mode, timeframe, price, candles, context });
     
     const result = finalize({ ai, context, symbol, mode, timeframe, price, quoteUpdatedAt });
@@ -103,11 +104,12 @@ async function requestGemini({ apiKey, symbol, mode, timeframe, price, candles, 
     `Recent Candles: ${JSON.stringify(candleWindow)}`
   ].join('\n');
 
+  // إرسال المفتاح بالطريقة الصحيحة عبر x-goog-api-key كما كان في النظام السابق
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
+      'x-goog-api-key': apiKey
     },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
@@ -254,4 +256,4 @@ function supertrend(bars, atr) {
 
 function n(val) { return Number.isFinite(val) ? Number(val.toFixed(6)) : null; }
 function round(val, sym) { return Number(val.toFixed(sym === 'EURUSD' ? 5 : 2)); }
-              
+                        
